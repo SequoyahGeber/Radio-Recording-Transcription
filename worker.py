@@ -32,6 +32,10 @@ if not os.path.exists(FOLDER_TO_WATCH):
 def setup_database():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
+    
+    # Enables write-ahead logging to prevent database locks on multiple threads
+    cursor.execute("PRAGMA journal_mode=WAL;") 
+    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS transcripts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,14 +64,10 @@ def queue_existing_unprocessed_files():
     conn.close()
 
     queued_count = 0
-    # os.walk allows us to look inside all subfolders (e.g. live_audio/Security/)
     for root, dirs, files in os.walk(FOLDER_TO_WATCH):
         for filename in sorted(files):
             if filename.lower().endswith((".mp3", ".wav", ".m4a")):
                 filepath = os.path.join(root, filename)
-                
-                # Get the path relative to live_audio (e.g., "Security/001.mp3")
-                # We replace Windows backslashes with forward slashes for web compatibility
                 rel_path = os.path.relpath(filepath, FOLDER_TO_WATCH).replace("\\", "/")
                 
                 if rel_path not in processed_files:
@@ -81,16 +81,18 @@ def queue_existing_unprocessed_files():
 
 def process_task(item):
     global consecutive_errors
-    # We now pass the relative path through the queue
     filepath, rel_path, retry_count = item
     
     try:
         if not os.path.exists(filepath):
             return
             
-        size1 = os.path.getsize(filepath)
-        time.sleep(1) 
-        size2 = os.path.getsize(filepath)
+        try:
+            size1 = os.path.getsize(filepath)
+            time.sleep(1) 
+            size2 = os.path.getsize(filepath)
+        except FileNotFoundError:
+            return 
         
         if size1 == 0 or size1 != size2:
             if retry_count < MAX_RETRIES:
@@ -101,14 +103,15 @@ def process_task(item):
         start_time = time.time()
         
         segments, _ = model.transcribe(filepath, beam_size=5, vad_filter=False, language="en", condition_on_previous_text=False)
-        full_transcript = "".join([f"[{s.start:.2f}s -> {s.end:.2f}s] {s.text} " for s in segments])
+        
+        # [MODIFIED] Strips internal timestamps and just outputs pure readable text
+        full_transcript = " ".join([s.text.strip() for s in segments])
         
         end_time = time.time()
         current_time = datetime.now().isoformat()
         
         with sqlite3.connect(DB_NAME, timeout=10) as conn:
             cursor = conn.cursor()
-            # Save the relative path (Folder/File.mp3) to the database
             cursor.execute("INSERT INTO transcripts (timestamp, filename, transcript_text) VALUES (?, ?, ?)",
                            (current_time, rel_path, full_transcript))
             conn.commit()
@@ -149,11 +152,9 @@ class AudioFileHandler(FileSystemEventHandler):
         if event.is_directory:
             return
             
-        # Safely decode the path to a string to satisfy strict type checkers (Pylance)
         src_path = os.fsdecode(event.src_path)
         
         if src_path.lower().endswith((".mp3", ".wav", ".m4a")):
-            # Extract the folder structure when a new file drops
             rel_path = os.path.relpath(src_path, FOLDER_TO_WATCH).replace("\\", "/")
             transcription_queue.put((src_path, rel_path, 0))
             
@@ -164,7 +165,6 @@ worker_thread.start()
 
 event_handler = AudioFileHandler()
 observer = Observer()
-# RECURSIVE=TRUE allows Watchdog to look inside all subfolders!
 observer.schedule(event_handler, FOLDER_TO_WATCH, recursive=True)
 observer.start()
 

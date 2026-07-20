@@ -145,7 +145,6 @@
 
       /* --- Forms & Controls --- */
       input[type="time"],
-      select,
       .btn,
       .search-input {
         width: 100%;
@@ -162,7 +161,6 @@
       }
 
       input[type="time"]:focus,
-      select:focus,
       .search-input:focus {
         border-color: var(--brand-primary);
         box-shadow: 0 0 0 2px var(--brand-glow);
@@ -192,15 +190,6 @@
       }
       .btn-primary:hover {
         background: var(--brand-hover);
-      }
-      .btn-danger {
-        background: rgba(239, 68, 68, 0.1);
-        border-color: var(--alert-danger);
-        color: var(--alert-danger);
-      }
-      .btn-danger:hover {
-        background: var(--alert-danger);
-        color: white;
       }
 
       .toggle-group {
@@ -261,13 +250,7 @@
         flex-direction: column;
         height: 100%;
         box-shadow: var(--shadow-sm);
-        transition:
-          transform 0.2s,
-          box-shadow 0.2s;
-      }
-      .channel-column.dragging {
-        opacity: 0.5;
-        transform: scale(0.98);
+        transition: transform 0.3s ease-in-out;
       }
 
       .col-header {
@@ -275,10 +258,6 @@
         background: var(--bg-surface-2);
         border-bottom: 1px solid var(--border-strong);
         border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-        cursor: grab;
-      }
-      .col-header:active {
-        cursor: grabbing;
       }
       .col-title-row {
         display: flex;
@@ -303,12 +282,34 @@
         border-radius: 50%;
       }
 
+      .col-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .arrow-btn {
+        background: transparent;
+        border: 1px solid var(--border-strong);
+        color: var(--text-secondary);
+        cursor: pointer;
+        border-radius: 6px;
+        padding: 4px 8px;
+        font-size: 0.8rem;
+        transition: all 0.2s;
+      }
+      .arrow-btn:hover {
+        background: var(--bg-surface-2);
+        color: var(--text-primary);
+        border-color: var(--brand-primary);
+      }
+
       .scroll-toggle {
         background: transparent;
         border: 1px solid var(--border-strong);
         color: var(--text-secondary);
         cursor: pointer;
-        border-radius: 20px;
+        border-radius: 6px;
         padding: 4px 12px;
         font-size: 0.75rem;
         font-weight: 600;
@@ -348,7 +349,9 @@
         box-shadow: var(--shadow-md);
         border-color: var(--border-strong);
       }
-      .message-card.hidden {
+
+      .message-card.hidden-search,
+      .message-card.hidden-time {
         display: none !important;
       }
 
@@ -392,31 +395,7 @@
         font-size: 0.95rem;
         line-height: 1.6;
         color: var(--text-primary);
-        display: flex;
-        flex-direction: column;
-        gap: 10px;
-      }
-      .segment-row {
-        display: flex;
-        align-items: flex-start;
-      }
-      .segment-text {
-        flex: 1;
         word-break: break-word;
-      }
-
-      .time-tag {
-        background: rgba(59, 130, 246, 0.1);
-        color: var(--brand-hover);
-        padding: 2px 6px;
-        border-radius: 4px;
-        font-size: 0.75rem;
-        font-family: "Courier New", Courier, monospace;
-        font-weight: 600;
-        margin-right: 12px;
-        margin-top: 2px;
-        flex-shrink: 0;
-        border: 1px solid rgba(59, 130, 246, 0.2);
       }
 
       .keyword-alert {
@@ -549,12 +528,7 @@
       }
       body.compact-mode .transcript-content {
         font-size: 0.85rem;
-        gap: 6px;
         line-height: 1.4;
-      }
-      body.compact-mode .time-tag {
-        font-size: 0.7rem;
-        padding: 1px 4px;
       }
       body.compact-mode .custom-audio-player {
         display: none;
@@ -569,8 +543,7 @@
       </div>
 
       <div class="sidebar-section">
-        <div class="section-title">Display & Audio</div>
-
+        <div class="section-title">Display Settings</div>
         <label class="checkbox-label">
           <div class="checkbox-inner">
             <input
@@ -582,24 +555,8 @@
             Compact Data View
           </div>
         </label>
-
-        <select
-          id="audio-speed"
-          onchange="updateAudioSpeed(this.value)"
-          style="margin-top: 12px"
-        >
-          <option value="1.0">Speed: 1.0x (Normal)</option>
-          <option value="1.25">Speed: 1.25x</option>
-          <option value="1.5">Speed: 1.5x (Fast)</option>
-          <option value="2.0">Speed: 2.0x (Rush)</option>
-        </select>
-
-        <button class="btn btn-danger" onclick="muteAllAudio()">
-          🔇 Mute All Audio
-        </button>
       </div>
 
-      <!-- DYNAMIC KEYWORDS SECTION ADDED HERE -->
       <div class="sidebar-section">
         <div class="section-title">Alert Keywords</div>
         <input
@@ -682,6 +639,7 @@
       const dashboard = document.getElementById("dashboard");
       const togglesContainer = document.getElementById("channel-toggles");
       const knownChannels = new Set();
+      const processedMessages = new Set();
       const autoScrollState = {};
       const unreadCounts = {};
 
@@ -691,7 +649,6 @@
         "police",
         "fire",
         "emergency",
-        "tech",
         "security",
         "breach",
         "injury",
@@ -701,15 +658,26 @@
 
       function renderKeywords() {
         const container = document.getElementById("keyword-list");
-        container.innerHTML = alertKeywords
-          .map(
-            (kw) =>
-              `<span class="keyword-alert" style="cursor:pointer; font-size:0.75rem;" onclick="removeKeyword('${kw}')" title="Click to remove">
-                  ${kw} ✕
-              </span>`,
-          )
-          .join("");
-        keywordRegex = new RegExp(`\\b(${alertKeywords.join("|")})\\b`, "gi");
+        container.innerHTML = "";
+
+        alertKeywords.forEach((kw) => {
+          const span = document.createElement("span");
+          span.className = "keyword-alert";
+          span.style.cursor = "pointer";
+          span.style.fontSize = "0.75rem";
+          span.title = "Click to remove";
+          span.innerText = `${kw} ✕`;
+          span.onclick = () => removeKeyword(kw);
+          container.appendChild(span);
+        });
+
+        const safeKeywords = alertKeywords.map((kw) =>
+          kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+        );
+        keywordRegex =
+          safeKeywords.length > 0
+            ? new RegExp(`\\b(${safeKeywords.join("|")})\\b`, "gi")
+            : null;
         localStorage.setItem("radioKeywords", JSON.stringify(alertKeywords));
       }
 
@@ -731,7 +699,7 @@
         showToast(`Keyword removed: ${kw}`);
       };
 
-      renderKeywords(); // Initialize Keywords on Load
+      renderKeywords(); // Initialize Keywords
 
       // --- Utility Functions ---
       function showToast(message, type = "default") {
@@ -746,21 +714,26 @@
         }, 3000);
       }
 
-      // --- Utility Functions ---
       function getChannelName(filename) {
-        // 1. If the file is inside a folder (e.g., "Security/audio.mp3"), use the folder name!
-        if (filename.includes("/")) {
-          return filename.split("/")[0];
-        }
-
-        // 2. Fallback: Try to extract from the old timestamp format if they are in the root folder
+        if (filename.includes("/")) return filename.split("/")[0];
         const match = filename.match(
           /^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-(.+)\.mp3$/i,
         );
         if (match) return match[1];
-
-        // 3. Final Fallback: Just use the filename
         return filename.replace(".mp3", "");
+      }
+
+      function extractTimeFromFilename(filename, fallbackTimestamp) {
+        // Look for YYYY-MM-DD-HH-MM-SS
+        const fullMatch = filename.match(
+          /(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})/,
+        );
+        if (fullMatch) {
+          const [_, year, month, day, hour, min, sec] = fullMatch;
+          const d = new Date(`${year}-${month}-${day}T${hour}:${min}:${sec}`);
+          if (!isNaN(d)) return d;
+        }
+        return fallbackTimestamp ? new Date(fallbackTimestamp) : new Date();
       }
 
       // --- Column Builder ---
@@ -782,65 +755,75 @@
         const col = document.createElement("div");
         col.className = "channel-column";
         col.id = colId;
-        col.draggable = true;
         autoScrollState[colId] = true;
 
         col.innerHTML = `
             <div class="col-header">
                 <div class="col-title-row">
                     <div class="col-title">${channelName}</div>
-                    <button class="scroll-toggle active" onclick="toggleAutoScroll('${colId}', this)">Auto-Scroll</button>
+                    <div class="col-actions">
+                        <button class="arrow-btn" onclick="moveColumn('${colId}', 'left')" title="Move Left">◀</button>
+                        <button class="arrow-btn" onclick="moveColumn('${colId}', 'right')" title="Move Right">▶</button>
+                        <button class="scroll-toggle active" onclick="toggleAutoScroll('${colId}', this)">Auto-Scroll</button>
+                    </div>
                 </div>
                 <input type="text" class="search-input" style="background: rgba(0,0,0,0.2); margin:0;" placeholder="Filter this feed..." onkeyup="filterMessages('${colId}', this.value)">
             </div>
             <div class="messages-container" id="msgs-${colId}"></div>
         `;
 
-        // Drag and Drop
-        col.addEventListener("dragstart", (e) => {
-          e.dataTransfer.setData("text/plain", colId);
-          setTimeout(() => col.classList.add("dragging"), 0);
-        });
-        col.addEventListener("dragend", () => col.classList.remove("dragging"));
-        col.addEventListener("dragover", (e) => e.preventDefault());
-        col.addEventListener("drop", (e) => {
-          e.preventDefault();
-          const draggedId = e.dataTransfer.getData("text/plain");
-          const draggedElement = document.getElementById(draggedId);
-          if (draggedElement !== col) {
-            const allCols = [...dashboard.children];
-            if (allCols.indexOf(draggedElement) < allCols.indexOf(col)) {
-              dashboard.insertBefore(draggedElement, col.nextSibling);
-            } else {
-              dashboard.insertBefore(draggedElement, col);
-            }
-          }
-        });
-
         dashboard.appendChild(col);
         showToast(`New Channel Connected: ${channelName}`);
         return document.getElementById(`msgs-${colId}`);
       }
 
+      // --- Move Columns ---
+      window.moveColumn = function (colId, direction) {
+        const col = document.getElementById(colId);
+        if (!col) return;
+
+        if (direction === "left") {
+          const prev = col.previousElementSibling;
+          if (prev && prev.classList.contains("channel-column")) {
+            dashboard.insertBefore(col, prev);
+          }
+        } else if (direction === "right") {
+          const next = col.nextElementSibling;
+          if (next && next.classList.contains("channel-column")) {
+            dashboard.insertBefore(next, col);
+          }
+        }
+      };
+
       // --- Custom Audio Player Logic ---
       window.togglePlay = function (btn) {
         const audio = btn.parentElement.querySelector("audio");
         if (audio.paused) {
-          // Pause all others globally
           document.querySelectorAll("audio").forEach((a) => {
             if (a !== audio) {
               a.pause();
               const otherBtn = a.parentElement.querySelector(".play-btn");
-              if (otherBtn) otherBtn.innerText = "▶";
+              if (otherBtn) {
+                otherBtn.innerText = "▶";
+                otherBtn.style.paddingLeft = "2px";
+              }
             }
           });
-          audio.play();
-          btn.innerText = "⏸";
-          btn.style.paddingLeft = "0"; // Center pause icon
+
+          audio
+            .play()
+            .then(() => {
+              btn.innerText = "⏸";
+              btn.style.paddingLeft = "0";
+            })
+            .catch((e) => {
+              console.error("Playback failed", e);
+              showToast("Audio unavailable or missing.", "danger");
+            });
         } else {
           audio.pause();
           btn.innerText = "▶";
-          btn.style.paddingLeft = "2px"; // Optical center for play icon
+          btn.style.paddingLeft = "2px";
         }
       };
 
@@ -855,7 +838,7 @@
 
       window.seekAudio = function (e, container) {
         const audio = container.parentElement.querySelector("audio");
-        if (!audio.duration) return;
+        if (!audio.duration || isNaN(audio.duration)) return;
         const rect = container.getBoundingClientRect();
         const pos = (e.clientX - rect.left) / rect.width;
         audio.currentTime = pos * audio.duration;
@@ -885,58 +868,47 @@
         const card = document.createElement("div");
         card.className = "message-card";
 
-        const timeObj = data.timestamp ? new Date(data.timestamp) : new Date();
-        card.setAttribute("data-time", timeObj.toTimeString().substring(0, 5));
-        const timeStr = timeObj.toLocaleTimeString([], {
+        // Get exact time from filename, instead of processing time
+        const realTime = extractTimeFromFilename(data.filename, data.timestamp);
+
+        // Save HH:MM for accurate filtering
+        const hours = realTime.getHours().toString().padStart(2, "0");
+        const mins = realTime.getMinutes().toString().padStart(2, "0");
+        card.setAttribute("data-time", `${hours}:${mins}`);
+
+        // Display nice readable time format
+        const timeStr = realTime.toLocaleTimeString([], {
           hour: "2-digit",
           minute: "2-digit",
           second: "2-digit",
         });
 
-        // Highlight Keywords dynamically using the generated Regex
-        let formattedText = data.transcript_text.replace(
-          /\[(\d+\.\d+s -> \d+\.\d+s)\]\s*(.*?)(?=\[|$)/gs,
-          (match, time, text) => {
-            let highlightedText = text;
-            if (keywordRegex && alertKeywords.length > 0) {
-              highlightedText = text.replace(
-                keywordRegex,
-                '<span class="keyword-alert">$&</span>',
-              );
-            }
-            return `<div class="segment-row">
-                        <div class="time-tag">[${time}]</div>
-                        <div class="segment-text">${highlightedText}</div>
-                    </div>`;
-          },
+        // Strip legacy timestamps if they exist from older DB records
+        let cleanText = data.transcript_text.replace(
+          /\[\d+\.\d+s -> \d+\.\d+s\]\s*/g,
+          "",
         );
 
-        if (!formattedText.includes("segment-row")) {
-          let fallbackHighlight = data.transcript_text;
-          if (keywordRegex && alertKeywords.length > 0) {
-            fallbackHighlight = data.transcript_text.replace(
-              keywordRegex,
-              '<span class="keyword-alert">$&</span>',
-            );
-          }
-          formattedText = `<div class="segment-text">${fallbackHighlight}</div>`;
+        if (keywordRegex) {
+          cleanText = cleanText.replace(
+            keywordRegex,
+            '<span class="keyword-alert">$&</span>',
+          );
         }
 
         const safeRawText = data.transcript_text
           .toLowerCase()
           .replace(/"/g, "&quot;");
-        const currentSpeed = document.getElementById("audio-speed").value;
+        const safeAudioUrl =
+          "/audio/" +
+          data.filename.split("/").map(encodeURIComponent).join("/");
 
-        // Safely encode the URL so spaces in folder names (e.g. "Production Dispatch") don't break the audio player
-        const safeAudioUrl = encodeURI(`/audio/${data.filename}`);
-
-        // Injected New Custom Player HTML
         card.innerHTML = `
             <div class="msg-meta">
                 <span>${timeStr}</span>
                 <a href="${safeAudioUrl}" target="_blank" class="audio-link" title="Download Source File">💾 Source</a>
             </div>
-            <div class="transcript-content" data-raw="${safeRawText}">${formattedText}</div>
+            <div class="transcript-content" data-raw="${safeRawText}">${cleanText}</div>
             
             <div class="custom-audio-player">
                 <button class="play-btn" onclick="togglePlay(this)">▶</button>
@@ -944,7 +916,7 @@
                     <div class="progress-fill"></div>
                 </div>
                 <div class="time-display">0:00</div>
-                <audio src="${safeAudioUrl}" preload="none" ontimeupdate="updateProgress(this)" onended="resetPlayer(this)" onplay="this.playbackRate = ${currentSpeed}"></audio>
+                <audio src="${safeAudioUrl}" preload="none" ontimeupdate="updateProgress(this)" onended="resetPlayer(this)"></audio>
             </div>
         `;
         return card;
@@ -975,37 +947,29 @@
           const text = msg
             .querySelector(".transcript-content")
             .getAttribute("data-raw");
-          msg.classList.toggle("hidden", !text.includes(lowerQuery));
+          msg.classList.toggle("hidden-search", !text.includes(lowerQuery));
         }
       };
 
-      window.updateAudioSpeed = function (speed) {
-        document
-          .querySelectorAll("audio")
-          .forEach((a) => (a.playbackRate = parseFloat(speed)));
-        showToast(`Global playback speed set to ${speed}x`);
-      };
-
-      window.muteAllAudio = function () {
-        document.querySelectorAll("audio").forEach((a) => {
-          a.pause();
-          a.currentTime = 0;
-          const btn = a.parentElement.querySelector(".play-btn");
-          if (btn) {
-            btn.innerText = "▶";
-            btn.style.paddingLeft = "2px";
-          }
-        });
-        showToast("All audio stopped & silenced", "success");
-      };
-
       window.applyTimeFilter = function () {
-        const start = document.getElementById("filter-start").value;
-        const end = document.getElementById("filter-end").value;
+        const start = document.getElementById("filter-start").value; // e.g. "09:00"
+        const end = document.getElementById("filter-end").value; // e.g. "17:00"
         if (!start || !end) return;
+
         document.querySelectorAll(".message-card").forEach((card) => {
           const msgTime = card.getAttribute("data-time");
-          card.classList.toggle("hidden", msgTime < start || msgTime > end);
+          let isHidden = false;
+
+          // Logic correctly handles normal shifts and overnight shifts
+          if (start <= end) {
+            // Normal Range (e.g. 09:00 to 17:00)
+            isHidden = msgTime < start || msgTime > end;
+          } else {
+            // Overnight Range (e.g. 22:00 to 06:00)
+            // Time must be AFTER start OR BEFORE end
+            isHidden = !(msgTime >= start || msgTime <= end);
+          }
+          card.classList.toggle("hidden-time", isHidden);
         });
         showToast(`Time filter applied: ${start} - ${end}`);
       };
@@ -1015,7 +979,7 @@
         document.getElementById("filter-end").value = "";
         document
           .querySelectorAll(".message-card")
-          .forEach((card) => card.classList.remove("hidden"));
+          .forEach((card) => card.classList.remove("hidden-time"));
         showToast("Time filter cleared");
       };
 
@@ -1025,18 +989,21 @@
         const visibleColumns = [...dashboard.children].filter(
           (col) => col.style.display !== "none",
         );
+
         visibleColumns.forEach((col) => {
           const channel = col.querySelector(".col-title").textContent.trim();
-          const messages = col.querySelectorAll(".message-card:not(.hidden)");
+          const messages = col.querySelectorAll(
+            ".message-card:not(.hidden-search):not(.hidden-time)",
+          );
           messages.forEach((msg) => {
             const time = msg.querySelector(".msg-meta span").innerText;
             let text = msg
               .querySelector(".transcript-content")
-              .getAttribute("data-raw")
-              .replace(/"/g, '""');
+              .innerText.replace(/"/g, '""');
             csvContent += `"${time}","${channel}","${text}"\n`;
           });
         });
+
         const encodedUri = encodeURI(csvContent);
         const link = document.createElement("a");
         link.setAttribute("href", encodedUri);
@@ -1052,6 +1019,9 @@
 
       // --- Live Data Processor ---
       function processIncomingData(data) {
+        if (processedMessages.has(data.filename)) return;
+        processedMessages.add(data.filename);
+
         const channelName = getChannelName(data.filename);
 
         if (!knownChannels.has(channelName)) {
@@ -1064,12 +1034,10 @@
         const card = createMessageCard(data);
         container.appendChild(card);
 
-        // Desktop Notification for Critical Keywords
-        if (keywordRegex && keywordRegex.test(data.transcript_text)) {
+        if (keywordRegex && data.transcript_text.match(keywordRegex)) {
           triggerDesktopNotification(channelName, data.transcript_text);
         }
 
-        // Unread Counts for Hidden Columns
         const colElement = document.getElementById(colId);
         if (colElement.style.display === "none") {
           unreadCounts[colId]++;
@@ -1085,16 +1053,27 @@
         }
       }
 
-      // --- Connection Initialization ---
+      // --- Connection Initialization with Auto-Reconnect ---
+      let ws;
+      function connectWebSocket() {
+        ws = new WebSocket(`ws://${window.location.host}/ws`);
+        ws.onmessage = (event) => processIncomingData(JSON.parse(event.data));
+        ws.onopen = () => showToast("Live Server Connected", "success");
+        ws.onclose = () => {
+          showToast("Connection Lost! Reconnecting in 3s...", "danger");
+          setTimeout(connectWebSocket, 3000);
+        };
+        ws.onerror = () => ws.close();
+      }
+
+      // Initial Fetch then WebSocket connection
       fetch("/api/history")
         .then((res) => res.json())
         .then((history) => history.forEach(processIncomingData))
-        .catch((err) => console.log("No history found or server offline."));
-
-      const ws = new WebSocket(`ws://${window.location.host}/ws`);
-      ws.onmessage = (event) => processIncomingData(JSON.parse(event.data));
-      ws.onopen = () => showToast("Live Server Connected", "success");
-      ws.onerror = () => showToast("WebSocket Connection Error", "danger");
+        .catch((err) => console.log("No history found or server offline."))
+        .finally(() => {
+          connectWebSocket();
+        });
     </script>
   </body>
 </html>

@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="LiveOps Command Server")
 
 # --- CORS MIDDLEWARE ---
-# Allows the frontend to be hosted on a different domain/port if you ever scale up
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -50,15 +49,12 @@ class ConnectionManager:
 
     async def broadcast(self, message: str):
         dead_connections = []
-        # Send to all connected clients
         for connection in self.active_connections:
             try:
                 await connection.send_text(message)
             except RuntimeError:
-                # Catch clients that dropped connection unexpectedly (e.g. laptop closed)
                 dead_connections.append(connection)
         
-        # Clean up dead connections to prevent memory leaks
         for dead in dead_connections:
             self.disconnect(dead)
 
@@ -73,7 +69,6 @@ class TranscriptPayload(BaseModel):
 # --- ROUTES ---
 @app.get("/")
 async def get():
-    """Serves the main Command Center UI."""
     html_path = os.path.join(BASE_DIR, "index.html")
     if not os.path.exists(html_path):
         return HTMLResponse("<h1>Error: index.html not found!</h1>", status_code=404)
@@ -82,7 +77,6 @@ async def get():
 
 @app.get("/api/health")
 def health_check():
-    """Diagnostic endpoint to ensure the server is running."""
     return {
         "status": "online", 
         "active_clients": len(manager.active_connections),
@@ -91,13 +85,10 @@ def health_check():
 
 @app.get("/api/history")
 def get_history():
-    """Fetches the last 200 messages to populate the UI on refresh."""
     if not os.path.exists(DB_NAME):
         return []
         
     try:
-        # DB URI with mode=ro (Read-Only) ensures the web server never locks the database
-        # This prevents locking collisions with worker.py saving new transcripts
         db_uri = f"file:{DB_NAME}?mode=ro"
         with sqlite3.connect(db_uri, uri=True, timeout=10) as conn:
             cursor = conn.cursor()
@@ -114,7 +105,6 @@ def get_history():
 
 @app.post("/api/new_transcript")
 async def new_transcript(payload: TranscriptPayload):
-    """Receives new transcripts from worker.py and broadcasts them to the UI."""
     data = json.dumps({
         "filename": payload.filename,
         "transcript_text": payload.transcript_text,
@@ -126,11 +116,9 @@ async def new_transcript(payload: TranscriptPayload):
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """Handles persistent live connections with the browser."""
     await manager.connect(websocket)
     try:
         while True:
-            # Keeps the connection open. If the browser closes, this throws an exception.
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
