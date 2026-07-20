@@ -1,0 +1,1100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Radio Command Center | Live Ops</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+
+    <style>
+      :root {
+        /* Deep, modern dark mode palette */
+        --bg-base: #090a0f;
+        --bg-surface-1: rgba(23, 25, 31, 0.7);
+        --bg-surface-2: #1c1f26;
+        --bg-card: #232730;
+        --bg-card-hover: #2a2f3a;
+
+        /* Accents & Alerts */
+        --brand-primary: #3b82f6;
+        --brand-hover: #60a5fa;
+        --brand-glow: rgba(59, 130, 246, 0.5);
+        --alert-danger: #ef4444;
+        --alert-danger-bg: rgba(239, 68, 68, 0.15);
+        --success: #10b981;
+
+        /* Typography */
+        --text-primary: #f8fafc;
+        --text-secondary: #94a3b8;
+        --text-muted: #64748b;
+
+        /* Structural */
+        --border-subtle: rgba(255, 255, 255, 0.08);
+        --border-strong: rgba(255, 255, 255, 0.12);
+        --radius-md: 8px;
+        --radius-lg: 12px;
+        --shadow-sm: 0 4px 6px rgba(0, 0, 0, 0.2);
+        --shadow-md: 0 10px 15px rgba(0, 0, 0, 0.3);
+      }
+
+      /* --- Global Resets & Scrollbars --- */
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        font-family: "Inter", sans-serif;
+        background-color: var(--bg-base);
+        color: var(--text-primary);
+        display: flex;
+        height: 100vh;
+        overflow: hidden;
+        background-image: radial-gradient(
+          circle at top right,
+          rgba(59, 130, 246, 0.05),
+          transparent 40%
+        );
+      }
+
+      ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #334155;
+        border-radius: 10px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #475569;
+      }
+
+      /* --- Sidebar --- */
+      #sidebar {
+        width: 300px;
+        background: var(--bg-surface-1);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        border-right: 1px solid var(--border-subtle);
+        display: flex;
+        flex-direction: column;
+        padding: 24px;
+        z-index: 10;
+        overflow-y: auto;
+        box-shadow: 4px 0 24px rgba(0, 0, 0, 0.2);
+      }
+
+      .brand-header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 32px;
+        font-size: 1.25rem;
+        font-weight: 700;
+        letter-spacing: -0.5px;
+      }
+
+      .live-pulse {
+        width: 12px;
+        height: 12px;
+        background-color: var(--success);
+        border-radius: 50%;
+        box-shadow: 0 0 12px var(--success);
+        animation: pulse 2s infinite ease-in-out;
+      }
+
+      @keyframes pulse {
+        0% {
+          box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+          transform: scale(0.95);
+        }
+        70% {
+          box-shadow: 0 0 0 8px rgba(16, 185, 129, 0);
+          transform: scale(1);
+        }
+        100% {
+          box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+          transform: scale(0.95);
+        }
+      }
+
+      .sidebar-section {
+        margin-bottom: 24px;
+        border-bottom: 1px solid var(--border-subtle);
+        padding-bottom: 20px;
+      }
+
+      .section-title {
+        color: var(--text-muted);
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 1.2px;
+        margin-bottom: 16px;
+      }
+
+      /* --- Forms & Controls --- */
+      input[type="time"],
+      select,
+      .btn,
+      .search-input {
+        width: 100%;
+        padding: 10px 12px;
+        margin-bottom: 12px;
+        background: var(--bg-surface-2);
+        color: var(--text-primary);
+        border: 1px solid var(--border-strong);
+        border-radius: var(--radius-md);
+        font-family: inherit;
+        font-size: 0.9rem;
+        transition: all 0.2s ease;
+        outline: none;
+      }
+
+      input[type="time"]:focus,
+      select:focus,
+      .search-input:focus {
+        border-color: var(--brand-primary);
+        box-shadow: 0 0 0 2px var(--brand-glow);
+      }
+
+      .btn {
+        background: var(--bg-surface-2);
+        font-weight: 500;
+        cursor: pointer;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .btn:hover {
+        background: #334155;
+        border-color: #475569;
+      }
+      .btn:active {
+        transform: translateY(1px);
+      }
+      .btn-primary {
+        background: var(--brand-primary);
+        border: none;
+        font-weight: 600;
+      }
+      .btn-primary:hover {
+        background: var(--brand-hover);
+      }
+      .btn-danger {
+        background: rgba(239, 68, 68, 0.1);
+        border-color: var(--alert-danger);
+        color: var(--alert-danger);
+      }
+      .btn-danger:hover {
+        background: var(--alert-danger);
+        color: white;
+      }
+
+      .toggle-group {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .checkbox-label {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        cursor: pointer;
+        font-size: 0.9rem;
+        padding: 8px 12px;
+        border-radius: var(--radius-md);
+        background: transparent;
+        transition: background 0.2s;
+        border: 1px solid transparent;
+      }
+      .checkbox-label:hover {
+        background: var(--bg-surface-2);
+        border-color: var(--border-subtle);
+      }
+      .checkbox-inner {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .unread-badge {
+        background: var(--alert-danger);
+        color: white;
+        font-size: 0.7rem;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-weight: 700;
+        display: none;
+        box-shadow: 0 2px 4px rgba(239, 68, 68, 0.4);
+      }
+
+      /* --- Dashboard Grid --- */
+      #dashboard {
+        flex: 1;
+        display: flex;
+        gap: 24px;
+        padding: 24px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scroll-behavior: smooth;
+      }
+
+      .channel-column {
+        background: rgba(28, 31, 38, 0.6);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-lg);
+        min-width: 400px;
+        max-width: 450px;
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        box-shadow: var(--shadow-sm);
+        transition:
+          transform 0.2s,
+          box-shadow 0.2s;
+      }
+      .channel-column.dragging {
+        opacity: 0.5;
+        transform: scale(0.98);
+      }
+
+      .col-header {
+        padding: 20px;
+        background: var(--bg-surface-2);
+        border-bottom: 1px solid var(--border-strong);
+        border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+        cursor: grab;
+      }
+      .col-header:active {
+        cursor: grabbing;
+      }
+      .col-title-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 16px;
+      }
+      .col-title {
+        font-weight: 700;
+        font-size: 1.1rem;
+        color: var(--text-primary);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .col-title::before {
+        content: "";
+        display: block;
+        width: 8px;
+        height: 8px;
+        background: var(--brand-primary);
+        border-radius: 50%;
+      }
+
+      .scroll-toggle {
+        background: transparent;
+        border: 1px solid var(--border-strong);
+        color: var(--text-secondary);
+        cursor: pointer;
+        border-radius: 20px;
+        padding: 4px 12px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        transition: all 0.2s;
+      }
+      .scroll-toggle.active {
+        color: var(--brand-primary);
+        border-color: var(--brand-primary);
+        background: rgba(59, 130, 246, 0.1);
+      }
+
+      .messages-container {
+        flex: 1;
+        padding: 20px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        scroll-behavior: smooth;
+      }
+
+      /* --- Message Cards --- */
+      .message-card {
+        background: var(--bg-card);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-md);
+        padding: 16px;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+        animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        transition:
+          transform 0.2s,
+          box-shadow 0.2s,
+          border-color 0.2s;
+      }
+      .message-card:hover {
+        transform: translateY(-2px);
+        box-shadow: var(--shadow-md);
+        border-color: var(--border-strong);
+      }
+      .message-card.hidden {
+        display: none !important;
+      }
+
+      @keyframes slideIn {
+        from {
+          opacity: 0;
+          transform: translateY(15px) scale(0.98);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0) scale(1);
+        }
+      }
+
+      .msg-meta {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        margin-bottom: 12px;
+        border-bottom: 1px solid var(--border-subtle);
+        padding-bottom: 8px;
+        font-weight: 600;
+      }
+
+      .audio-link {
+        color: var(--brand-primary);
+        text-decoration: none;
+        background: rgba(59, 130, 246, 0.1);
+        padding: 2px 8px;
+        border-radius: 4px;
+        transition: background 0.2s;
+        font-size: 1rem;
+      }
+      .audio-link:hover {
+        background: rgba(59, 130, 246, 0.2);
+      }
+
+      .transcript-content {
+        font-size: 0.95rem;
+        line-height: 1.6;
+        color: var(--text-primary);
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .segment-row {
+        display: flex;
+        align-items: flex-start;
+      }
+      .segment-text {
+        flex: 1;
+        word-break: break-word;
+      }
+
+      .time-tag {
+        background: rgba(59, 130, 246, 0.1);
+        color: var(--brand-hover);
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        font-family: "Courier New", Courier, monospace;
+        font-weight: 600;
+        margin-right: 12px;
+        margin-top: 2px;
+        flex-shrink: 0;
+        border: 1px solid rgba(59, 130, 246, 0.2);
+      }
+
+      .keyword-alert {
+        background: var(--alert-danger-bg);
+        color: #fca5a5;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-weight: 700;
+        border: 1px solid rgba(239, 68, 68, 0.3);
+        box-shadow: 0 0 8px rgba(239, 68, 68, 0.2);
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        transition: opacity 0.2s;
+      }
+      .keyword-alert:hover {
+        opacity: 0.8;
+      }
+
+      /* --- Custom Audio Player --- */
+      .custom-audio-player {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        background: rgba(0, 0, 0, 0.2);
+        padding: 8px 12px;
+        border-radius: 8px;
+        margin-top: 16px;
+        border: 1px solid var(--border-subtle);
+      }
+      .play-btn {
+        background: var(--brand-primary);
+        border: none;
+        color: white;
+        width: 30px;
+        height: 30px;
+        border-radius: 50%;
+        cursor: pointer;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        transition:
+          transform 0.2s,
+          background 0.2s;
+        font-size: 0.8rem;
+        padding-left: 2px;
+      }
+      .play-btn:hover {
+        background: var(--brand-hover);
+        transform: scale(1.1);
+      }
+
+      .progress-bar-container {
+        flex: 1;
+        height: 6px;
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 3px;
+        cursor: pointer;
+        position: relative;
+      }
+      .progress-fill {
+        height: 100%;
+        background: var(--brand-primary);
+        width: 0%;
+        border-radius: 3px;
+        transition: width 0.1s linear;
+        pointer-events: none;
+      }
+      .time-display {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        font-variant-numeric: tabular-nums;
+        min-width: 36px;
+        text-align: right;
+      }
+
+      /* --- Toast Notifications --- */
+      #toast-container {
+        position: fixed;
+        bottom: 24px;
+        right: 24px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        z-index: 1000;
+      }
+      .toast {
+        background: var(--bg-surface-2);
+        color: var(--text-primary);
+        padding: 12px 20px;
+        border-radius: var(--radius-md);
+        border-left: 4px solid var(--brand-primary);
+        box-shadow: var(--shadow-md);
+        font-size: 0.9rem;
+        font-weight: 500;
+        animation: toastSlideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        opacity: 0;
+      }
+      .toast.toast-success {
+        border-left-color: var(--success);
+      }
+      .toast.toast-danger {
+        border-left-color: var(--alert-danger);
+      }
+
+      @keyframes toastSlideIn {
+        from {
+          transform: translateX(100%);
+          opacity: 0;
+        }
+        to {
+          transform: translateX(0);
+          opacity: 1;
+        }
+      }
+      @keyframes toastFadeOut {
+        to {
+          opacity: 0;
+          transform: translateY(-10px);
+        }
+      }
+
+      /* --- Compact Mode Overrides --- */
+      body.compact-mode .message-card {
+        padding: 10px 14px;
+      }
+      body.compact-mode .msg-meta {
+        margin-bottom: 6px;
+        padding-bottom: 4px;
+      }
+      body.compact-mode .transcript-content {
+        font-size: 0.85rem;
+        gap: 6px;
+        line-height: 1.4;
+      }
+      body.compact-mode .time-tag {
+        font-size: 0.7rem;
+        padding: 1px 4px;
+      }
+      body.compact-mode .custom-audio-player {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <nav id="sidebar">
+      <div class="brand-header">
+        <div class="live-pulse"></div>
+        Ops Command
+      </div>
+
+      <div class="sidebar-section">
+        <div class="section-title">Display & Audio</div>
+
+        <label class="checkbox-label">
+          <div class="checkbox-inner">
+            <input
+              type="checkbox"
+              onchange="
+                document.body.classList.toggle('compact-mode', this.checked)
+              "
+            />
+            Compact Data View
+          </div>
+        </label>
+
+        <select
+          id="audio-speed"
+          onchange="updateAudioSpeed(this.value)"
+          style="margin-top: 12px"
+        >
+          <option value="1.0">Speed: 1.0x (Normal)</option>
+          <option value="1.25">Speed: 1.25x</option>
+          <option value="1.5">Speed: 1.5x (Fast)</option>
+          <option value="2.0">Speed: 2.0x (Rush)</option>
+        </select>
+
+        <button class="btn btn-danger" onclick="muteAllAudio()">
+          🔇 Mute All Audio
+        </button>
+      </div>
+
+      <!-- DYNAMIC KEYWORDS SECTION ADDED HERE -->
+      <div class="sidebar-section">
+        <div class="section-title">Alert Keywords</div>
+        <input
+          type="text"
+          id="new-keyword"
+          placeholder="Add keyword + Enter"
+          onkeypress="addKeyword(event)"
+          class="search-input"
+          style="margin-bottom: 12px"
+        />
+        <div
+          id="keyword-list"
+          style="display: flex; flex-wrap: wrap; gap: 6px"
+        ></div>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="section-title">Global Time Filter</div>
+        <input type="time" id="filter-start" aria-label="Start Time" />
+        <input type="time" id="filter-end" aria-label="End Time" />
+        <div style="display: flex; gap: 8px">
+          <button class="btn" style="flex: 1" onclick="applyTimeFilter()">
+            Filter
+          </button>
+          <button
+            class="btn"
+            style="flex: 1; background: transparent"
+            onclick="clearTimeFilter()"
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+
+      <div class="sidebar-section" style="flex: 1">
+        <div class="section-title">Active Feeds</div>
+        <div class="toggle-group" id="channel-toggles"></div>
+      </div>
+
+      <button class="btn btn-primary" onclick="exportCSV()">
+        <svg
+          width="16"
+          height="16"
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
+          ></path>
+        </svg>
+        Export CSV Log
+      </button>
+    </nav>
+
+    <main id="dashboard"></main>
+    <div id="toast-container"></div>
+
+    <script>
+      // --- OS Notification Setup ---
+      if ("Notification" in window) {
+        Notification.requestPermission();
+      }
+
+      function triggerDesktopNotification(channel, text) {
+        if (Notification.permission === "granted") {
+          const notification = new Notification(`🚨 CRITICAL: ${channel}`, {
+            body: text,
+            icon: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🚨</text></svg>',
+          });
+          notification.onclick = () => window.focus();
+        }
+      }
+
+      // --- Core Configuration & State ---
+      const dashboard = document.getElementById("dashboard");
+      const togglesContainer = document.getElementById("channel-toggles");
+      const knownChannels = new Set();
+      const autoScrollState = {};
+      const unreadCounts = {};
+
+      // Dynamic Keyword Setup
+      let alertKeywords = JSON.parse(localStorage.getItem("radioKeywords")) || [
+        "medical",
+        "police",
+        "fire",
+        "emergency",
+        "tech",
+        "security",
+        "breach",
+        "injury",
+        "help",
+      ];
+      let keywordRegex;
+
+      function renderKeywords() {
+        const container = document.getElementById("keyword-list");
+        container.innerHTML = alertKeywords
+          .map(
+            (kw) =>
+              `<span class="keyword-alert" style="cursor:pointer; font-size:0.75rem;" onclick="removeKeyword('${kw}')" title="Click to remove">
+                  ${kw} ✕
+              </span>`,
+          )
+          .join("");
+        keywordRegex = new RegExp(`\\b(${alertKeywords.join("|")})\\b`, "gi");
+        localStorage.setItem("radioKeywords", JSON.stringify(alertKeywords));
+      }
+
+      window.addKeyword = function (e) {
+        if (e.key === "Enter" && e.target.value.trim() !== "") {
+          const kw = e.target.value.trim().toLowerCase();
+          if (!alertKeywords.includes(kw)) {
+            alertKeywords.push(kw);
+            renderKeywords();
+            showToast(`Keyword added: ${kw}`, "success");
+          }
+          e.target.value = "";
+        }
+      };
+
+      window.removeKeyword = function (kw) {
+        alertKeywords = alertKeywords.filter((k) => k !== kw);
+        renderKeywords();
+        showToast(`Keyword removed: ${kw}`);
+      };
+
+      renderKeywords(); // Initialize Keywords on Load
+
+      // --- Utility Functions ---
+      function showToast(message, type = "default") {
+        const container = document.getElementById("toast-container");
+        const toast = document.createElement("div");
+        toast.className = `toast ${type !== "default" ? "toast-" + type : ""}`;
+        toast.innerText = message;
+        container.appendChild(toast);
+        setTimeout(() => {
+          toast.style.animation = "toastFadeOut 0.3s forwards";
+          setTimeout(() => toast.remove(), 300);
+        }, 3000);
+      }
+
+      // --- Utility Functions ---
+      function getChannelName(filename) {
+        // 1. If the file is inside a folder (e.g., "Security/audio.mp3"), use the folder name!
+        if (filename.includes("/")) {
+          return filename.split("/")[0];
+        }
+
+        // 2. Fallback: Try to extract from the old timestamp format if they are in the root folder
+        const match = filename.match(
+          /^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-(.+)\.mp3$/i,
+        );
+        if (match) return match[1];
+
+        // 3. Final Fallback: Just use the filename
+        return filename.replace(".mp3", "");
+      }
+
+      // --- Column Builder ---
+      function createColumn(channelName) {
+        const colId = `col-${channelName.replace(/[^a-zA-Z0-9]/g, "-")}`;
+        unreadCounts[colId] = 0;
+
+        const toggleWrapper = document.createElement("label");
+        toggleWrapper.className = "checkbox-label";
+        toggleWrapper.innerHTML = `
+            <div class="checkbox-inner">
+                <input type="checkbox" id="toggle-${colId}" checked onchange="toggleColumn('${colId}', this.checked)"> 
+                ${channelName}
+            </div>
+            <span class="unread-badge" id="badge-${colId}">0</span>
+        `;
+        togglesContainer.appendChild(toggleWrapper);
+
+        const col = document.createElement("div");
+        col.className = "channel-column";
+        col.id = colId;
+        col.draggable = true;
+        autoScrollState[colId] = true;
+
+        col.innerHTML = `
+            <div class="col-header">
+                <div class="col-title-row">
+                    <div class="col-title">${channelName}</div>
+                    <button class="scroll-toggle active" onclick="toggleAutoScroll('${colId}', this)">Auto-Scroll</button>
+                </div>
+                <input type="text" class="search-input" style="background: rgba(0,0,0,0.2); margin:0;" placeholder="Filter this feed..." onkeyup="filterMessages('${colId}', this.value)">
+            </div>
+            <div class="messages-container" id="msgs-${colId}"></div>
+        `;
+
+        // Drag and Drop
+        col.addEventListener("dragstart", (e) => {
+          e.dataTransfer.setData("text/plain", colId);
+          setTimeout(() => col.classList.add("dragging"), 0);
+        });
+        col.addEventListener("dragend", () => col.classList.remove("dragging"));
+        col.addEventListener("dragover", (e) => e.preventDefault());
+        col.addEventListener("drop", (e) => {
+          e.preventDefault();
+          const draggedId = e.dataTransfer.getData("text/plain");
+          const draggedElement = document.getElementById(draggedId);
+          if (draggedElement !== col) {
+            const allCols = [...dashboard.children];
+            if (allCols.indexOf(draggedElement) < allCols.indexOf(col)) {
+              dashboard.insertBefore(draggedElement, col.nextSibling);
+            } else {
+              dashboard.insertBefore(draggedElement, col);
+            }
+          }
+        });
+
+        dashboard.appendChild(col);
+        showToast(`New Channel Connected: ${channelName}`);
+        return document.getElementById(`msgs-${colId}`);
+      }
+
+      // --- Custom Audio Player Logic ---
+      window.togglePlay = function (btn) {
+        const audio = btn.parentElement.querySelector("audio");
+        if (audio.paused) {
+          // Pause all others globally
+          document.querySelectorAll("audio").forEach((a) => {
+            if (a !== audio) {
+              a.pause();
+              const otherBtn = a.parentElement.querySelector(".play-btn");
+              if (otherBtn) otherBtn.innerText = "▶";
+            }
+          });
+          audio.play();
+          btn.innerText = "⏸";
+          btn.style.paddingLeft = "0"; // Center pause icon
+        } else {
+          audio.pause();
+          btn.innerText = "▶";
+          btn.style.paddingLeft = "2px"; // Optical center for play icon
+        }
+      };
+
+      window.updateProgress = function (audio) {
+        const container = audio.parentElement;
+        const fill = container.querySelector(".progress-fill");
+        const timeDisplay = container.querySelector(".time-display");
+        const percent = (audio.currentTime / audio.duration) * 100;
+        fill.style.width = `${percent || 0}%`;
+        timeDisplay.innerText = formatTime(audio.currentTime);
+      };
+
+      window.seekAudio = function (e, container) {
+        const audio = container.parentElement.querySelector("audio");
+        if (!audio.duration) return;
+        const rect = container.getBoundingClientRect();
+        const pos = (e.clientX - rect.left) / rect.width;
+        audio.currentTime = pos * audio.duration;
+      };
+
+      window.resetPlayer = function (audio) {
+        const btn = audio.parentElement.querySelector(".play-btn");
+        if (btn) {
+          btn.innerText = "▶";
+          btn.style.paddingLeft = "2px";
+        }
+        audio.parentElement.querySelector(".progress-fill").style.width = "0%";
+        audio.parentElement.querySelector(".time-display").innerText = "0:00";
+      };
+
+      function formatTime(seconds) {
+        if (isNaN(seconds) || !isFinite(seconds)) return "0:00";
+        const m = Math.floor(seconds / 60);
+        const s = Math.floor(seconds % 60)
+          .toString()
+          .padStart(2, "0");
+        return `${m}:${s}`;
+      }
+
+      // --- Card Builder ---
+      function createMessageCard(data) {
+        const card = document.createElement("div");
+        card.className = "message-card";
+
+        const timeObj = data.timestamp ? new Date(data.timestamp) : new Date();
+        card.setAttribute("data-time", timeObj.toTimeString().substring(0, 5));
+        const timeStr = timeObj.toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        });
+
+        // Highlight Keywords dynamically using the generated Regex
+        let formattedText = data.transcript_text.replace(
+          /\[(\d+\.\d+s -> \d+\.\d+s)\]\s*(.*?)(?=\[|$)/gs,
+          (match, time, text) => {
+            let highlightedText = text;
+            if (keywordRegex && alertKeywords.length > 0) {
+              highlightedText = text.replace(
+                keywordRegex,
+                '<span class="keyword-alert">$&</span>',
+              );
+            }
+            return `<div class="segment-row">
+                        <div class="time-tag">[${time}]</div>
+                        <div class="segment-text">${highlightedText}</div>
+                    </div>`;
+          },
+        );
+
+        if (!formattedText.includes("segment-row")) {
+          let fallbackHighlight = data.transcript_text;
+          if (keywordRegex && alertKeywords.length > 0) {
+            fallbackHighlight = data.transcript_text.replace(
+              keywordRegex,
+              '<span class="keyword-alert">$&</span>',
+            );
+          }
+          formattedText = `<div class="segment-text">${fallbackHighlight}</div>`;
+        }
+
+        const safeRawText = data.transcript_text
+          .toLowerCase()
+          .replace(/"/g, "&quot;");
+        const currentSpeed = document.getElementById("audio-speed").value;
+
+        // Safely encode the URL so spaces in folder names (e.g. "Production Dispatch") don't break the audio player
+        const safeAudioUrl = encodeURI(`/audio/${data.filename}`);
+
+        // Injected New Custom Player HTML
+        card.innerHTML = `
+            <div class="msg-meta">
+                <span>${timeStr}</span>
+                <a href="${safeAudioUrl}" target="_blank" class="audio-link" title="Download Source File">💾 Source</a>
+            </div>
+            <div class="transcript-content" data-raw="${safeRawText}">${formattedText}</div>
+            
+            <div class="custom-audio-player">
+                <button class="play-btn" onclick="togglePlay(this)">▶</button>
+                <div class="progress-bar-container" onclick="seekAudio(event, this)">
+                    <div class="progress-fill"></div>
+                </div>
+                <div class="time-display">0:00</div>
+                <audio src="${safeAudioUrl}" preload="none" ontimeupdate="updateProgress(this)" onended="resetPlayer(this)" onplay="this.playbackRate = ${currentSpeed}"></audio>
+            </div>
+        `;
+        return card;
+      }
+
+      // --- Interactive Functions ---
+      window.toggleColumn = function (colId, isChecked) {
+        const col = document.getElementById(colId);
+        const badge = document.getElementById(`badge-${colId}`);
+        col.style.display = isChecked ? "flex" : "none";
+        if (isChecked) {
+          unreadCounts[colId] = 0;
+          badge.style.display = "none";
+          badge.innerText = "0";
+        }
+      };
+
+      window.toggleAutoScroll = function (colId, btn) {
+        autoScrollState[colId] = !autoScrollState[colId];
+        btn.classList.toggle("active", autoScrollState[colId]);
+      };
+
+      window.filterMessages = function (colId, query) {
+        const container = document.getElementById(`msgs-${colId}`);
+        const messages = container.getElementsByClassName("message-card");
+        const lowerQuery = query.toLowerCase();
+        for (let msg of messages) {
+          const text = msg
+            .querySelector(".transcript-content")
+            .getAttribute("data-raw");
+          msg.classList.toggle("hidden", !text.includes(lowerQuery));
+        }
+      };
+
+      window.updateAudioSpeed = function (speed) {
+        document
+          .querySelectorAll("audio")
+          .forEach((a) => (a.playbackRate = parseFloat(speed)));
+        showToast(`Global playback speed set to ${speed}x`);
+      };
+
+      window.muteAllAudio = function () {
+        document.querySelectorAll("audio").forEach((a) => {
+          a.pause();
+          a.currentTime = 0;
+          const btn = a.parentElement.querySelector(".play-btn");
+          if (btn) {
+            btn.innerText = "▶";
+            btn.style.paddingLeft = "2px";
+          }
+        });
+        showToast("All audio stopped & silenced", "success");
+      };
+
+      window.applyTimeFilter = function () {
+        const start = document.getElementById("filter-start").value;
+        const end = document.getElementById("filter-end").value;
+        if (!start || !end) return;
+        document.querySelectorAll(".message-card").forEach((card) => {
+          const msgTime = card.getAttribute("data-time");
+          card.classList.toggle("hidden", msgTime < start || msgTime > end);
+        });
+        showToast(`Time filter applied: ${start} - ${end}`);
+      };
+
+      window.clearTimeFilter = function () {
+        document.getElementById("filter-start").value = "";
+        document.getElementById("filter-end").value = "";
+        document
+          .querySelectorAll(".message-card")
+          .forEach((card) => card.classList.remove("hidden"));
+        showToast("Time filter cleared");
+      };
+
+      window.exportCSV = function () {
+        let csvContent =
+          "data:text/csv;charset=utf-8,Time,Channel,Transcript\n";
+        const visibleColumns = [...dashboard.children].filter(
+          (col) => col.style.display !== "none",
+        );
+        visibleColumns.forEach((col) => {
+          const channel = col.querySelector(".col-title").textContent.trim();
+          const messages = col.querySelectorAll(".message-card:not(.hidden)");
+          messages.forEach((msg) => {
+            const time = msg.querySelector(".msg-meta span").innerText;
+            let text = msg
+              .querySelector(".transcript-content")
+              .getAttribute("data-raw")
+              .replace(/"/g, '""');
+            csvContent += `"${time}","${channel}","${text}"\n`;
+          });
+        });
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute(
+          "download",
+          `LiveOps_Log_${new Date().toLocaleDateString().replace(/\//g, "-")}.csv`,
+        );
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        showToast("CSV Exported Successfully!", "success");
+      };
+
+      // --- Live Data Processor ---
+      function processIncomingData(data) {
+        const channelName = getChannelName(data.filename);
+
+        if (!knownChannels.has(channelName)) {
+          knownChannels.add(channelName);
+          createColumn(channelName);
+        }
+
+        const colId = `col-${channelName.replace(/[^a-zA-Z0-9]/g, "-")}`;
+        const container = document.getElementById(`msgs-${colId}`);
+        const card = createMessageCard(data);
+        container.appendChild(card);
+
+        // Desktop Notification for Critical Keywords
+        if (keywordRegex && keywordRegex.test(data.transcript_text)) {
+          triggerDesktopNotification(channelName, data.transcript_text);
+        }
+
+        // Unread Counts for Hidden Columns
+        const colElement = document.getElementById(colId);
+        if (colElement.style.display === "none") {
+          unreadCounts[colId]++;
+          const badge = document.getElementById(`badge-${colId}`);
+          badge.innerText = unreadCounts[colId];
+          badge.style.display = "inline-block";
+          badge.style.transform = "scale(1.2)";
+          setTimeout(() => (badge.style.transform = "scale(1)"), 150);
+        }
+
+        if (autoScrollState[colId]) {
+          container.scrollTop = container.scrollHeight;
+        }
+      }
+
+      // --- Connection Initialization ---
+      fetch("/api/history")
+        .then((res) => res.json())
+        .then((history) => history.forEach(processIncomingData))
+        .catch((err) => console.log("No history found or server offline."));
+
+      const ws = new WebSocket(`ws://${window.location.host}/ws`);
+      ws.onmessage = (event) => processIncomingData(JSON.parse(event.data));
+      ws.onopen = () => showToast("Live Server Connected", "success");
+      ws.onerror = () => showToast("WebSocket Connection Error", "danger");
+    </script>
+  </body>
+</html>

@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+websockets
+faster-whisper
+watchdog
+requests
+pydantic
+aiofiles
+urllib3<2
