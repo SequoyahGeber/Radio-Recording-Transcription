@@ -1,0 +1,19 @@
+# Virtual Environments
+venv/
+env/
+.env
+
+# Python Caches (these are generated automatically, no need to share them)
+__pycache__/
+*.pyc
+
+# Mac System Files
+.DS_Store
+
+# User Data (Don't upload massive audio files or your local database to GitHub)
+data/live_audio/*
+*.db
+*.sqlite3
+
+# Keep the live_audio folder structure, but ignore the files inside it
+!data/live_audio/.gitkeep
