@@ -1,42 +1,57 @@
-#!/bin/bash
+@echo off
+:: Move back to the project root directory
+cd /d "%~dp0\.."
 
-echo "========================================"
-echo "  STARTING RADIO COMMAND CENTER"
-echo "========================================"
+:: If this script was called with an argument by itself, route to the correct loop
+if "%1"=="SERVER" goto run_server
+if "%1"=="WORKER" goto run_worker
 
-# Use the Python executables directly from the virtual environment
-VENV_PYTHON="./venv/bin/python"
-VENV_UVICORN="./venv/bin/uvicorn"
+:: ==========================================
+:: MAIN LAUNCHER WINDOW
+:: ==========================================
+color 0A
+echo ========================================
+echo   STARTING RADIO COMMAND CENTER
+echo ========================================
+echo.
+echo Launching Server and Worker in separate windows...
+echo (To completely shut down the system, close all three windows)
+echo.
 
-# Function to keep the Web Server alive
-run_server() {
-    while true; do
-        echo "[SYSTEM] Starting Web Server on port 8000..."
-        $VENV_UVICORN server:app --host 0.0.0.0 --port 8000
-        echo "[SYSTEM] ⚠️ Web Server crashed or stopped! Restarting in 3 seconds..."
-        sleep 3
-    done
-}
+:: Start the sub-processes in separate windows by calling this script with arguments
+start "Radio Command - Server" cmd /c "scripts\start.bat SERVER"
+start "Radio Command - AI Worker" cmd /c "scripts\start.bat WORKER"
 
-# Function to keep the AI Worker alive
-run_worker() {
-    while true; do
-        echo "[SYSTEM] Starting AI Transcription Worker..."
-        $VENV_PYTHON worker.py
-        echo "[SYSTEM] ⚠️ Worker crashed or stopped! Restarting in 3 seconds..."
-        sleep 3
-    done
-}
+echo [SYSTEM] All services launched! 
+echo [SYSTEM] Web Interface is available at: http://localhost:8000
+echo.
+pause
+exit /b
 
-# Start both processes in the background
-run_server &
-SERVER_PID=$!
+:: ==========================================
+:: SERVER PROCESS LOOP
+:: ==========================================
+:run_server
+:: Light Yellow Text for Server Logs
+color 0E
+:server_loop
+echo [SYSTEM] Starting Web Server on port 8000...
+venv\Scripts\uvicorn.exe backend.server:app --host 0.0.0.0 --port 8000
+echo.
+echo [SYSTEM] WARNING: Web Server crashed or stopped! Restarting in 3 seconds...
+timeout /t 3 /nobreak >nul
+goto server_loop
 
-run_worker &
-WORKER_PID=$!
-
-# Trap Ctrl+C so you can shut down the whole system cleanly
-trap "echo -e '\n[SYSTEM] Shutting down Command Center...'; kill $SERVER_PID $WORKER_PID; exit" SIGINT SIGTERM
-
-# Keep the script running and wait for user to press Ctrl+C
-wait
+:: ==========================================
+:: WORKER PROCESS LOOP
+:: ==========================================
+:run_worker
+:: Light Purple Text for Worker Logs
+color 0D
+:worker_loop
+echo [SYSTEM] Starting AI Transcription Worker...
+venv\Scripts\python.exe backend\worker.py
+echo.
+echo [SYSTEM] WARNING: Worker crashed or stopped! Restarting in 3 seconds...
+timeout /t 3 /nobreak >nul
+goto worker_loop

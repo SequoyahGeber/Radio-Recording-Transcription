@@ -1,0 +1,1689 @@
+
+
+==================================================
+FILE: ./requirements.txt
+==================================================
+fastapi
+uvicorn[standard]
+websockets
+faster-whisper
+watchdog
+requests
+pydantic
+aiofiles
+urllib3<2
+
+==================================================
+FILE: ./frontend/index.html
+==================================================
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Radio Command Center | Live Ops</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+
+    <!-- Link to our separated CSS file -->
+    <link rel="stylesheet" href="/static/css/style.css" />
+  </head>
+  <body>
+    <nav id="sidebar">
+      <div class="brand-header">
+        <div class="live-pulse"></div>
+        Ops Command
+      </div>
+
+      <div class="sidebar-section">
+        <div class="section-title">Display Settings</div>
+        <label class="checkbox-label">
+          <div class="checkbox-inner">
+            <input
+              type="checkbox"
+              onchange="
+                document.body.classList.toggle('compact-mode', this.checked)
+              "
+            />
+            Compact Data View
+          </div>
+        </label>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="section-title">Alert Keywords</div>
+        <input
+          type="text"
+          id="new-keyword"
+          placeholder="Add keyword + Enter"
+          onkeypress="addKeyword(event)"
+          class="search-input"
+          style="margin-bottom: 12px"
+        />
+        <div
+          id="keyword-list"
+          style="display: flex; flex-wrap: wrap; gap: 6px"
+        ></div>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="section-title">Global Time Filter</div>
+        <select
+          id="filter-start"
+          class="search-input"
+          aria-label="Start Time"
+        ></select>
+        <select
+          id="filter-end"
+          class="search-input"
+          aria-label="End Time"
+        ></select>
+        <div style="display: flex; gap: 8px">
+          <button class="btn" style="flex: 1" onclick="applyTimeFilter()">
+            Filter
+          </button>
+          <button
+            class="btn"
+            style="flex: 1; background: transparent"
+            onclick="clearTimeFilter()"
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+
+      <div class="sidebar-section" style="flex: 1">
+        <div class="section-title">Active Feeds</div>
+        <div class="toggle-group" id="channel-toggles"></div>
+      </div>
+
+      <button class="btn btn-primary" onclick="exportCSV()">
+        <svg
+          width="16"
+          height="16"
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
+          ></path>
+        </svg>
+        Export CSV Log
+      </button>
+    </nav>
+
+    <main id="dashboard"></main>
+    <div id="toast-container"></div>
+
+    <!-- Link to our separated JS file -->
+    <script src="/static/js/app.js"></script>
+  </body>
+</html>
+  
+
+==================================================
+FILE: ./frontend/css/style.css
+==================================================
+:root {
+  /* Deep, modern dark mode palette */
+  --bg-base: #090a0f;
+  --bg-surface-1: rgba(23, 25, 31, 0.7);
+  --bg-surface-2: #1c1f26;
+  --bg-card: #232730;
+  --bg-card-hover: #2a2f3a;
+
+  /* Accents & Alerts */
+  --brand-primary: #3b82f6;
+  --brand-hover: #60a5fa;
+  --brand-glow: rgba(59, 130, 246, 0.5);
+  --alert-danger: #ef4444;
+  --alert-danger-bg: rgba(239, 68, 68, 0.15);
+  --success: #10b981;
+
+  /* Typography */
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+
+  /* Structural */
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.12);
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --shadow-sm: 0 4px 6px rgba(0, 0, 0, 0.2);
+  --shadow-md: 0 10px 15px rgba(0, 0, 0, 0.3);
+}
+
+/* --- Global Resets & Scrollbars --- */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: "Inter", sans-serif;
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+  background-image: radial-gradient(
+    circle at top right,
+    rgba(59, 130, 246, 0.05),
+    transparent 40%
+  );
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* --- Sidebar --- */
+#sidebar {
+  width: 300px;
+  background: var(--bg-surface-1);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  padding: 24px;
+  z-index: 10;
+  overflow-y: auto;
+  box-shadow: 4px 0 24px rgba(0, 0, 0, 0.2);
+}
+
+.brand-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 32px;
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+}
+
+.live-pulse {
+  width: 12px;
+  height: 12px;
+  background-color: var(--success);
+  border-radius: 50%;
+  box-shadow: 0 0 12px var(--success);
+  animation: pulse 2s infinite ease-in-out;
+}
+
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); transform: scale(0.95); }
+  70% { box-shadow: 0 0 0 8px rgba(16, 185, 129, 0); transform: scale(1); }
+  100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); transform: scale(0.95); }
+}
+
+.sidebar-section {
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 20px;
+}
+
+.section-title {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  margin-bottom: 16px;
+}
+
+/* --- Forms & Controls --- */
+select.search-input,
+.btn,
+.search-input {
+  width: 100%;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  font-family: inherit;
+  font-size: 0.9rem;
+  transition: all 0.2s ease;
+  outline: none;
+}
+
+select.search-input {
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%2394a3b8%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5-1.9-9.2-5.4-12.8z%22%2F%3E%3C%2Fsvg%3E");
+  background-repeat: no-repeat, repeat;
+  background-position: right 0.7em top 50%, 0 0;
+  background-size: 0.65em auto, 100%;
+}
+
+select.search-input:focus,
+.search-input:focus {
+  border-color: var(--brand-primary);
+  box-shadow: 0 0 0 2px var(--brand-glow);
+}
+
+.btn {
+  background: var(--bg-surface-2);
+  font-weight: 500;
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn:hover {
+  background: #334155;
+  border-color: #475569;
+}
+.btn:active {
+  transform: translateY(1px);
+}
+.btn-primary {
+  background: var(--brand-primary);
+  border: none;
+  font-weight: 600;
+}
+.btn-primary:hover {
+  background: var(--brand-hover);
+}
+
+.toggle-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  font-size: 0.9rem;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  background: transparent;
+  transition: background 0.2s;
+  border: 1px solid transparent;
+}
+.checkbox-label:hover {
+  background: var(--bg-surface-2);
+  border-color: var(--border-subtle);
+}
+.checkbox-inner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.unread-badge {
+  background: var(--alert-danger);
+  color: white;
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-weight: 700;
+  display: none;
+  box-shadow: 0 2px 4px rgba(239, 68, 68, 0.4);
+}
+
+/* --- Dashboard Grid --- */
+#dashboard {
+  flex: 1;
+  display: flex;
+  gap: 24px;
+  padding: 24px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-behavior: smooth;
+}
+
+.channel-column {
+  background: rgba(28, 31, 38, 0.6);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  min-width: 400px;
+  max-width: 450px;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.3s ease-in-out;
+}
+
+.col-header {
+  padding: 20px;
+  background: var(--bg-surface-2);
+  border-bottom: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+.col-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.col-title {
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.col-title::before {
+  content: "";
+  display: block;
+  width: 8px;
+  height: 8px;
+  background: var(--brand-primary);
+  border-radius: 50%;
+}
+
+.col-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.arrow-btn {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 0.8rem;
+  transition: all 0.2s;
+}
+.arrow-btn:hover {
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+  border-color: var(--brand-primary);
+}
+
+.scroll-toggle {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+.scroll-toggle.active {
+  color: var(--brand-primary);
+  border-color: var(--brand-primary);
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.messages-container {
+  flex: 1;
+  padding: 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  scroll-behavior: smooth;
+}
+
+/* --- Message Cards --- */
+.message-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+  animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
+}
+.message-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+  border-color: var(--border-strong);
+}
+
+.message-card.hidden-search,
+.message-card.hidden-time {
+  display: none !important;
+}
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(15px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.msg-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 8px;
+  font-weight: 600;
+}
+
+.audio-link {
+  color: var(--brand-primary);
+  text-decoration: none;
+  background: rgba(59, 130, 246, 0.1);
+  padding: 2px 8px;
+  border-radius: 4px;
+  transition: background 0.2s;
+  font-size: 1rem;
+}
+.audio-link:hover {
+  background: rgba(59, 130, 246, 0.2);
+}
+
+.transcript-content {
+  font-size: 0.95rem;
+  line-height: 1.6;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.keyword-alert {
+  background: var(--alert-danger-bg);
+  color: #fca5a5;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 700;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.2);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: opacity 0.2s;
+}
+.keyword-alert:hover {
+  opacity: 0.8;
+}
+
+/* --- Custom Audio Player --- */
+.custom-audio-player {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 8px 12px;
+  border-radius: 8px;
+  margin-top: 16px;
+  border: 1px solid var(--border-subtle);
+}
+
+.play-btn {
+  background: var(--brand-primary);
+  border: none;
+  color: white;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  transition: transform 0.2s, background 0.2s;
+  font-size: 0.8rem;
+  padding-left: 2px;
+}
+.play-btn:hover {
+  background: var(--brand-hover);
+  transform: scale(1.1);
+}
+
+.progress-bar-container {
+  flex: 1;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  cursor: pointer;
+  position: relative;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--brand-primary);
+  width: 0%;
+  border-radius: 3px;
+  transition: width 0.1s linear;
+  pointer-events: none;
+}
+.time-display {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 36px;
+  text-align: right;
+}
+
+/* --- Toast Notifications --- */
+#toast-container {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 1000;
+}
+.toast {
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+  padding: 12px 20px;
+  border-radius: var(--radius-md);
+  border-left: 4px solid var(--brand-primary);
+  box-shadow: var(--shadow-md);
+  font-size: 0.9rem;
+  font-weight: 500;
+  animation: toastSlideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  opacity: 0;
+}
+.toast.toast-success {
+  border-left-color: var(--success);
+}
+.toast.toast-danger {
+  border-left-color: var(--alert-danger);
+}
+
+@keyframes toastSlideIn {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+@keyframes toastFadeOut {
+  to { opacity: 0; transform: translateY(-10px); }
+}
+
+/* --- Compact Mode Overrides --- */
+body.compact-mode .message-card {
+  padding: 10px 14px;
+}
+body.compact-mode .msg-meta {
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+}
+body.compact-mode .transcript-content {
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+body.compact-mode .custom-audio-player {
+  display: none;
+}
+
+==================================================
+FILE: ./frontend/js/app.js
+==================================================
+// --- Time Selector Generator ---
+function populateTimeFilters() {
+  const startSel = document.getElementById("filter-start");
+  const endSel = document.getElementById("filter-end");
+
+  startSel.innerHTML = `<option value="">Start Time...</option>`;
+  endSel.innerHTML = `<option value="">End Time...</option>`;
+
+  for (let i = 0; i < 24; i++) {
+    for (let j = 0; j < 60; j += 15) {
+      const hh = i.toString().padStart(2, "0");
+      const mm = j.toString().padStart(2, "0");
+      const time24 = `${hh}:${mm}`;
+
+      let ampm = i >= 12 ? "PM" : "AM";
+      let h12 = i % 12 || 12; // Converts 0 to 12
+      const time12 = `${h12}:${mm} ${ampm}`;
+
+      const opt = `<option value="${time24}">${time12}</option>`;
+      startSel.insertAdjacentHTML("beforeend", opt);
+      endSel.insertAdjacentHTML("beforeend", opt);
+    }
+  }
+}
+populateTimeFilters();
+
+// --- OS Notification Setup ---
+if ("Notification" in window) {
+  Notification.requestPermission();
+}
+
+function triggerDesktopNotification(channel, text) {
+  if (Notification.permission === "granted") {
+    const notification = new Notification(`🚨 CRITICAL: ${channel}`, {
+      body: text,
+      icon: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🚨</text></svg>',
+    });
+    notification.onclick = () => window.focus();
+  }
+}
+
+// --- Core Configuration & State ---
+const dashboard = document.getElementById("dashboard");
+const togglesContainer = document.getElementById("channel-toggles");
+const knownChannels = new Set();
+const processedMessages = new Set();
+const autoScrollState = {};
+const unreadCounts = {};
+
+// Dynamic Keyword Setup
+let alertKeywords = JSON.parse(localStorage.getItem("radioKeywords")) || [
+  "medical",
+  "police",
+  "fire",
+  "emergency",
+  "security",
+  "breach",
+  "injury",
+  "help",
+];
+let keywordRegex;
+
+function renderKeywords() {
+  const container = document.getElementById("keyword-list");
+  container.innerHTML = "";
+
+  alertKeywords.forEach((kw) => {
+    const span = document.createElement("span");
+    span.className = "keyword-alert";
+    span.style.cursor = "pointer";
+    span.style.fontSize = "0.75rem";
+    span.title = "Click to remove";
+    span.innerText = `${kw} ✕`;
+    span.onclick = () => removeKeyword(kw);
+    container.appendChild(span);
+  });
+
+  const validKeywords = alertKeywords.filter((k) => k.trim() !== "");
+  const safeKeywords = validKeywords.map((kw) =>
+    kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+  );
+  keywordRegex =
+    safeKeywords.length > 0
+      ? new RegExp(`\\b((?:${safeKeywords.join("|")})\\w*)`, "gi")
+      : null;
+
+  localStorage.setItem("radioKeywords", JSON.stringify(alertKeywords));
+}
+
+// TEXT HIGHLIGHTING ENGINE
+function escapeHTML(str) {
+  return str.replace(
+    /[&<>'"]/g,
+    (tag) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[
+        tag
+      ] || tag,
+  );
+}
+
+function highlightText(text) {
+  if (!keywordRegex) return escapeHTML(text);
+
+  let result = "";
+  let lastIndex = 0;
+
+  text.replace(keywordRegex, (...args) => {
+    const match = args[0];
+    const offset = args[args.length - 2];
+    result += escapeHTML(text.slice(lastIndex, offset));
+    result += `<span class="keyword-alert">${escapeHTML(match)}</span>`;
+    lastIndex = offset + match.length;
+    return match;
+  });
+
+  result += escapeHTML(text.slice(lastIndex));
+  return result;
+}
+
+window.rehighlightAllMessages = function () {
+  document.querySelectorAll(".message-card").forEach((card) => {
+    const contentDiv = card.querySelector(".transcript-content");
+    if (contentDiv) {
+      const rawText = decodeURIComponent(contentDiv.getAttribute("data-clean"));
+      contentDiv.innerHTML = highlightText(rawText);
+    }
+  });
+};
+
+window.addKeyword = function (e) {
+  if (e.key === "Enter" && e.target.value.trim() !== "") {
+    const kw = e.target.value.trim().toLowerCase();
+    if (!alertKeywords.includes(kw)) {
+      alertKeywords.push(kw);
+      renderKeywords();
+      rehighlightAllMessages();
+      showToast(`Keyword added: ${kw}`, "success");
+    }
+    e.target.value = "";
+  }
+};
+
+window.removeKeyword = function (kw) {
+  alertKeywords = alertKeywords.filter((k) => k !== kw);
+  renderKeywords();
+  rehighlightAllMessages();
+  showToast(`Keyword removed: ${kw}`);
+};
+
+renderKeywords();
+
+// --- Utility Functions ---
+function showToast(message, type = "default") {
+  const container = document.getElementById("toast-container");
+  const toast = document.createElement("div");
+  toast.className = `toast ${type !== "default" ? "toast-" + type : ""}`;
+  toast.innerText = message;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.style.animation = "toastFadeOut 0.3s forwards";
+    setTimeout(() => toast.remove(), 300);
+  }, 3000);
+}
+
+function getChannelName(filename) {
+  if (filename.includes("/")) return filename.split("/")[0];
+  const match = filename.match(
+    /^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-(.+)\.mp3$/i,
+  );
+  if (match) return match[1];
+  return filename.replace(".mp3", "");
+}
+
+function extractTimeFromFilename(filename, fallbackTimestamp) {
+  const fullMatch = filename.match(
+    /(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})/,
+  );
+  if (fullMatch) {
+    const [_, y, m, d, h, min, s] = fullMatch.map(Number);
+    const dateObj = new Date(y, m - 1, d, h, min, s);
+    if (!isNaN(dateObj)) return dateObj;
+  }
+  const fallback = fallbackTimestamp ? new Date(fallbackTimestamp) : new Date();
+  return isNaN(fallback) ? new Date() : fallback;
+}
+
+// --- Column Builder ---
+function createColumn(channelName) {
+  const colId = `col-${channelName.replace(/[^a-zA-Z0-9]/g, "-")}`;
+  unreadCounts[colId] = 0;
+
+  const toggleWrapper = document.createElement("label");
+  toggleWrapper.className = "checkbox-label";
+  toggleWrapper.innerHTML = `
+      <div class="checkbox-inner">
+          <input type="checkbox" id="toggle-${colId}" checked onchange="toggleColumn('${colId}', this.checked)"> 
+          ${channelName}
+      </div>
+      <span class="unread-badge" id="badge-${colId}">0</span>
+  `;
+  togglesContainer.appendChild(toggleWrapper);
+
+  const col = document.createElement("div");
+  col.className = "channel-column";
+  col.id = colId;
+  autoScrollState[colId] = true;
+
+  col.innerHTML = `
+      <div class="col-header">
+          <div class="col-title-row">
+              <div class="col-title">${channelName}</div>
+              <div class="col-actions">
+                  <button class="arrow-btn" onclick="moveColumn('${colId}', 'left')" title="Move Left">◀</button>
+                  <button class="arrow-btn" onclick="moveColumn('${colId}', 'right')" title="Move Right">▶</button>
+                  <button class="scroll-toggle active" onclick="toggleAutoScroll('${colId}', this)">Auto-Scroll</button>
+              </div>
+          </div>
+          <input type="text" class="search-input" style="background: rgba(0,0,0,0.2); margin:0;" placeholder="Filter this feed..." onkeyup="filterMessages('${colId}', this.value)">
+      </div>
+      <div class="messages-container" id="msgs-${colId}"></div>
+  `;
+
+  dashboard.appendChild(col);
+  showToast(`New Channel Connected: ${channelName}`);
+  return document.getElementById(`msgs-${colId}`);
+}
+
+window.moveColumn = function (colId, direction) {
+  const col = document.getElementById(colId);
+  if (!col) return;
+
+  if (direction === "left") {
+    const prev = col.previousElementSibling;
+    if (prev && prev.classList.contains("channel-column")) {
+      dashboard.insertBefore(col, prev);
+    }
+  } else if (direction === "right") {
+    const next = col.nextElementSibling;
+    if (next && next.classList.contains("channel-column")) {
+      dashboard.insertBefore(next, col);
+    }
+  }
+};
+
+window.updatePlayState = function (audio, state) {
+  const btn = audio.parentElement.querySelector(".play-btn");
+  if (!btn) return;
+  if (state === "playing") {
+    btn.innerHTML = "⏸";
+    btn.style.paddingLeft = "0";
+  } else if (state === "paused") {
+    btn.innerHTML = "▶";
+    btn.style.paddingLeft = "2px";
+  } else if (state === "waiting") {
+    btn.innerHTML = "⏳";
+    btn.style.paddingLeft = "0";
+  }
+};
+
+window.togglePlay = function (btn) {
+  const audio = btn.parentElement.querySelector("audio");
+  if (audio.paused) {
+    document.querySelectorAll("audio").forEach((a) => {
+      if (a !== audio && !a.paused) a.pause();
+    });
+    updatePlayState(audio, "waiting");
+    audio.play().catch((e) => {
+      if (e.name !== "AbortError") {
+        console.error("Playback failed", e);
+        showToast("Audio unavailable or missing.", "danger");
+        updatePlayState(audio, "paused");
+      }
+    });
+  } else {
+    updatePlayState(audio, "paused");
+    audio.pause();
+  }
+};
+
+window.updateProgress = function (audio) {
+  const container = audio.parentElement;
+  const fill = container.querySelector(".progress-fill");
+  const timeDisplay = container.querySelector(".time-display");
+  let percent = 0;
+  if (audio.duration && !isNaN(audio.duration)) {
+    percent = (audio.currentTime / audio.duration) * 100;
+  }
+  fill.style.width = `${percent}%`;
+  timeDisplay.innerText = formatTime(audio.currentTime);
+};
+
+window.seekAudio = function (e, container) {
+  const audio = container.parentElement.querySelector("audio");
+  if (!audio.duration || isNaN(audio.duration)) return;
+  const rect = container.getBoundingClientRect();
+  const pos = (e.clientX - rect.left) / rect.width;
+  audio.currentTime = pos * audio.duration;
+};
+
+window.resetPlayer = function (audio) {
+  updatePlayState(audio, "paused");
+  audio.parentElement.querySelector(".progress-fill").style.width = "0%";
+  audio.parentElement.querySelector(".time-display").innerText = "0:00";
+};
+
+function formatTime(seconds) {
+  if (isNaN(seconds) || !isFinite(seconds)) return "0:00";
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60)
+    .toString()
+    .padStart(2, "0");
+  return `${m}:${s}`;
+}
+
+function createMessageCard(data) {
+  const card = document.createElement("div");
+  card.className = "message-card";
+  const realTime = extractTimeFromFilename(data.filename, data.timestamp);
+  const hours = realTime.getHours().toString().padStart(2, "0");
+  const mins = realTime.getMinutes().toString().padStart(2, "0");
+  card.setAttribute("data-time", `${hours}:${mins}`);
+  const timeStr = realTime.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+
+  let cleanText = data.transcript_text.replace(
+    /\[\d+\.\d+s -> \d+\.\d+s\]\s*/g,
+    "",
+  );
+  const encodedCleanText = encodeURIComponent(cleanText);
+  const safeRawText = cleanText.toLowerCase().replace(/"/g, "&quot;");
+  const safeAudioUrl =
+    "/audio/" + data.filename.split("/").map(encodeURIComponent).join("/");
+
+  card.innerHTML = `
+      <div class="msg-meta">
+          <span>${timeStr}</span>
+          <a href="${safeAudioUrl}" target="_blank" class="audio-link" title="Download Source File">💾 Source</a>
+      </div>
+      <div class="transcript-content" data-clean="${encodedCleanText}" data-raw="${safeRawText}">
+          ${highlightText(cleanText)}
+      </div>
+      
+      <div class="custom-audio-player">
+          <button class="play-btn" onclick="togglePlay(this)">▶</button>
+          <div class="progress-bar-container" onclick="seekAudio(event, this)">
+              <div class="progress-fill"></div>
+          </div>
+          <div class="time-display">0:00</div>
+          <audio src="${safeAudioUrl}" preload="none" 
+              ontimeupdate="updateProgress(this)" 
+              onended="resetPlayer(this)"
+              onplay="updatePlayState(this, 'waiting')"
+              onplaying="updatePlayState(this, 'playing')"
+              onpause="updatePlayState(this, 'paused')">
+          </audio>
+      </div>
+  `;
+  return card;
+}
+
+window.toggleColumn = function (colId, isChecked) {
+  const col = document.getElementById(colId);
+  const badge = document.getElementById(`badge-${colId}`);
+  col.style.display = isChecked ? "flex" : "none";
+  if (isChecked) {
+    unreadCounts[colId] = 0;
+    badge.style.display = "none";
+    badge.innerText = "0";
+  }
+};
+
+window.toggleAutoScroll = function (colId, btn) {
+  autoScrollState[colId] = !autoScrollState[colId];
+  btn.classList.toggle("active", autoScrollState[colId]);
+};
+
+window.filterMessages = function (colId, query) {
+  const container = document.getElementById(`msgs-${colId}`);
+  const messages = container.getElementsByClassName("message-card");
+  const lowerQuery = query.toLowerCase();
+  for (let msg of messages) {
+    const text = msg
+      .querySelector(".transcript-content")
+      .getAttribute("data-raw");
+    msg.classList.toggle("hidden-search", !text.includes(lowerQuery));
+  }
+};
+
+window.applyTimeFilter = function () {
+  const start = document.getElementById("filter-start").value;
+  const end = document.getElementById("filter-end").value;
+  if (!start || !end) return;
+
+  function timeToMins(t) {
+    if (!t) return 0;
+    const [h, m] = t.split(":").map(Number);
+    return h * 60 + m;
+  }
+
+  const startMins = timeToMins(start);
+  const endMins = timeToMins(end);
+
+  document.querySelectorAll(".message-card").forEach((card) => {
+    const msgTimeStr = card.getAttribute("data-time");
+    if (!msgTimeStr) return;
+
+    const msgMins = timeToMins(msgTimeStr);
+    let isHidden = false;
+
+    if (startMins <= endMins) {
+      isHidden = msgMins < startMins || msgMins > endMins;
+    } else {
+      isHidden = !(msgMins >= startMins || msgMins <= endMins);
+    }
+    card.classList.toggle("hidden-time", isHidden);
+  });
+
+  const startLabel =
+    document.getElementById("filter-start").options[
+      document.getElementById("filter-start").selectedIndex
+    ].text;
+  const endLabel =
+    document.getElementById("filter-end").options[
+      document.getElementById("filter-end").selectedIndex
+    ].text;
+  showToast(`Time filter applied: ${startLabel} - ${endLabel}`);
+};
+
+window.clearTimeFilter = function () {
+  document.getElementById("filter-start").value = "";
+  document.getElementById("filter-end").value = "";
+  document
+    .querySelectorAll(".message-card")
+    .forEach((card) => card.classList.remove("hidden-time"));
+  showToast("Time filter cleared");
+};
+
+window.exportCSV = function () {
+  let csvContent = "data:text/csv;charset=utf-8,Time,Channel,Transcript\n";
+  const visibleColumns = [...dashboard.children].filter(
+    (col) => col.style.display !== "none",
+  );
+
+  visibleColumns.forEach((col) => {
+    const channel = col.querySelector(".col-title").textContent.trim();
+    const messages = col.querySelectorAll(
+      ".message-card:not(.hidden-search):not(.hidden-time)",
+    );
+    messages.forEach((msg) => {
+      const time = msg.querySelector(".msg-meta span").innerText;
+      let text = msg
+        .querySelector(".transcript-content")
+        .innerText.replace(/"/g, '""');
+      csvContent += `"${time}","${channel}","${text}"\n`;
+    });
+  });
+
+  const encodedUri = encodeURI(csvContent);
+  const link = document.createElement("a");
+  link.setAttribute("href", encodedUri);
+  link.setAttribute(
+    "download",
+    `LiveOps_Log_${new Date().toLocaleDateString().replace(/\//g, "-")}.csv`,
+  );
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  showToast("CSV Exported Successfully!", "success");
+};
+
+function processIncomingData(data) {
+  if (processedMessages.has(data.filename)) return;
+  processedMessages.add(data.filename);
+
+  const channelName = getChannelName(data.filename);
+
+  if (!knownChannels.has(channelName)) {
+    knownChannels.add(channelName);
+    createColumn(channelName);
+  }
+
+  const colId = `col-${channelName.replace(/[^a-zA-Z0-9]/g, "-")}`;
+  const container = document.getElementById(`msgs-${colId}`);
+  const card = createMessageCard(data);
+  container.appendChild(card);
+
+  if (keywordRegex && data.transcript_text.match(keywordRegex)) {
+    triggerDesktopNotification(channelName, data.transcript_text);
+  }
+
+  const colElement = document.getElementById(colId);
+  if (colElement.style.display === "none") {
+    unreadCounts[colId]++;
+    const badge = document.getElementById(`badge-${colId}`);
+    badge.innerText = unreadCounts[colId];
+    badge.style.display = "inline-block";
+    badge.style.transform = "scale(1.2)";
+    setTimeout(() => (badge.style.transform = "scale(1)"), 150);
+  }
+
+  if (autoScrollState[colId]) {
+    container.scrollTop = container.scrollHeight;
+  }
+}
+
+let ws;
+function connectWebSocket() {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+  ws.onmessage = (event) => processIncomingData(JSON.parse(event.data));
+  ws.onopen = () => showToast("Live Server Connected", "success");
+  ws.onclose = () => {
+    showToast("Connection Lost! Reconnecting in 3s...", "danger");
+    setTimeout(connectWebSocket, 3000);
+  };
+  ws.onerror = () => ws.close();
+}
+
+fetch("/api/history")
+  .then((res) => res.json())
+  .then((history) => history.forEach(processIncomingData))
+  .catch((err) => console.log("No history found or server offline."))
+  .finally(() => {
+    connectWebSocket();
+  });
+
+
+==================================================
+FILE: ./backend/worker.py
+==================================================
+import requests
+import time
+import os
+import sqlite3
+from threading import Thread, Timer, Lock
+from datetime import datetime
+from queue import Queue
+from concurrent.futures import ThreadPoolExecutor
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from faster_whisper import WhisperModel
+
+# Import paths from config instead of hardcoding
+from backend.config import AUDIO_DIR, DB_NAME
+
+# --- CONFIGURATION ---
+FOLDER_TO_WATCH = AUDIO_DIR
+MODEL_SIZE = "small"
+SERVER_URL = "http://127.0.0.1:8000/api/new_transcript"
+MAX_WORKERS = 3       
+
+MAX_RETRIES = 20      
+RETRY_DELAY = 10.0    
+
+# --- SELF-HEALING VARIABLES ---
+error_lock = Lock()
+consecutive_errors = 0
+MAX_CONSECUTIVE_ERRORS = 10 
+
+def setup_database():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    # Enables write-ahead logging to prevent database locks on multiple threads
+    cursor.execute("PRAGMA journal_mode=WAL;") 
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS transcripts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            filename TEXT,
+            transcript_text TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+    print(f"[DATABASE] Connected to {DB_NAME} successfully.")
+
+setup_database()
+transcription_queue = Queue()
+
+print(f"Loading {MODEL_SIZE} model into memory...")
+model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
+print("Model ready!\n")
+
+def queue_existing_unprocessed_files():
+    print("[STARTUP] Checking for existing unprocessed audio files in all subfolders...")
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT filename FROM transcripts")
+    processed_files = {row[0] for row in cursor.fetchall()}
+    conn.close()
+
+    queued_count = 0
+    for root, dirs, files in os.walk(FOLDER_TO_WATCH):
+        for filename in sorted(files):
+            if filename.lower().endswith((".mp3", ".wav", ".m4a")):
+                filepath = os.path.join(root, filename)
+                rel_path = os.path.relpath(filepath, FOLDER_TO_WATCH).replace("\\", "/")
+                
+                if rel_path not in processed_files:
+                    transcription_queue.put((filepath, rel_path, 0))
+                    queued_count += 1
+                
+    if queued_count > 0:
+        print(f"[STARTUP] Successfully queued {queued_count} old/missed files.\n")
+    else:
+        print("[STARTUP] No backlog found. We are fully caught up.\n")
+
+def process_task(item):
+    global consecutive_errors
+    filepath, rel_path, retry_count = item
+    
+    try:
+        if not os.path.exists(filepath):
+            return
+            
+        try:
+            size1 = os.path.getsize(filepath)
+            time.sleep(1) 
+            size2 = os.path.getsize(filepath)
+        except FileNotFoundError:
+            return 
+        
+        if size1 == 0 or size1 != size2:
+            if retry_count < MAX_RETRIES:
+                Timer(RETRY_DELAY, transcription_queue.put, args=(( (filepath, rel_path, retry_count + 1), ))).start()
+            return
+
+        print(f"[QUEUE] Starting transcription for: {rel_path}")
+        start_time = time.time()
+        
+        segments, _ = model.transcribe(filepath, beam_size=5, vad_filter=False, language="en", condition_on_previous_text=False)
+        
+        # Strips internal timestamps and just outputs pure readable text
+        full_transcript = " ".join([s.text.strip() for s in segments])
+        
+        end_time = time.time()
+        current_time = datetime.now().isoformat()
+        
+        with sqlite3.connect(DB_NAME, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO transcripts (timestamp, filename, transcript_text) VALUES (?, ?, ?)",
+                           (current_time, rel_path, full_transcript))
+            conn.commit()
+        
+        payload = {"filename": rel_path, "transcript_text": full_transcript, "timestamp": current_time}
+        requests.post(SERVER_URL, json=payload, timeout=2)
+        
+        print(f"[SUCCESS] Saved & Broadcasted: {rel_path} ({end_time - start_time:.2f}s)")
+        
+        with error_lock:
+            consecutive_errors = 0
+            
+    except Exception as e:
+        with error_lock:
+            consecutive_errors += 1
+            current_errors = consecutive_errors
+            
+        print(f"[ERROR] Transcription failed for {rel_path} ({e}).")
+        
+        if current_errors >= MAX_CONSECUTIVE_ERRORS:
+            print(f"\n[CRITICAL] {MAX_CONSECUTIVE_ERRORS} consecutive errors reached! Model may be corrupted.")
+            print("[CRITICAL] Triggering self-destruct to allow start.sh to restart the service...\n")
+            os._exit(1) 
+            
+        if retry_count < MAX_RETRIES:
+            Timer(RETRY_DELAY, transcription_queue.put, args=(( (filepath, rel_path, retry_count + 1), ))).start()
+    finally:
+        transcription_queue.task_done()
+
+def transcription_worker():
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        while True:
+            item = transcription_queue.get()
+            executor.submit(process_task, item)
+
+class AudioFileHandler(FileSystemEventHandler):
+    def on_created(self, event):
+        if event.is_directory:
+            return
+            
+        src_path = os.fsdecode(event.src_path)
+        
+        if src_path.lower().endswith((".mp3", ".wav", ".m4a")):
+            rel_path = os.path.relpath(src_path, FOLDER_TO_WATCH).replace("\\", "/")
+            transcription_queue.put((src_path, rel_path, 0))
+            
+queue_existing_unprocessed_files()
+
+worker_thread = Thread(target=transcription_worker, daemon=True)
+worker_thread.start()
+
+event_handler = AudioFileHandler()
+observer = Observer()
+observer.schedule(event_handler, FOLDER_TO_WATCH, recursive=True)
+observer.start()
+
+print(f"WATCHDOG ONLINE: Monitoring '{FOLDER_TO_WATCH}' and all subfolders.")
+print("Press Ctrl+C to stop the system.\n")
+
+try:
+    while True:
+        time.sleep(1)
+except KeyboardInterrupt:
+    print("\nShutting down Watchdog...")
+    observer.stop()
+observer.join()
+
+==================================================
+FILE: ./backend/server.py
+==================================================
+import os
+import sqlite3
+import json
+import logging
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List
+
+# Import paths from config
+from backend.config import PROJECT_ROOT, AUDIO_DIR, DB_NAME
+
+# --- SETUP LOGGING ---
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="LiveOps Command Server")
+
+# --- CORS MIDDLEWARE ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- STATIC FILES ---
+# Mount frontend folder so HTML can access CSS/JS
+app.mount("/static", StaticFiles(directory=os.path.join(PROJECT_ROOT, "frontend")), name="static")
+# Mount the audio files
+app.mount("/audio", StaticFiles(directory=AUDIO_DIR), name="audio")
+
+# --- WEBSOCKET MANAGER ---
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        logger.info(f"Client connected. Active Operators: {len(self.active_connections)}")
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+            logger.info(f"Client disconnected. Active Operators: {len(self.active_connections)}")
+
+    async def broadcast(self, message: str):
+        dead_connections = []
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message)
+            except RuntimeError:
+                dead_connections.append(connection)
+        
+        for dead in dead_connections:
+            self.disconnect(dead)
+
+manager = ConnectionManager()
+
+# --- DATA MODELS ---
+class TranscriptPayload(BaseModel):
+    filename: str
+    transcript_text: str
+    timestamp: str
+
+# --- ROUTES ---
+@app.get("/")
+async def get():
+    html_path = os.path.join(PROJECT_ROOT, "frontend", "index.html")
+    if not os.path.exists(html_path):
+        return HTMLResponse("<h1>Error: index.html not found!</h1>", status_code=404)
+    with open(html_path, "r", encoding="utf-8") as f:
+        return HTMLResponse(f.read())
+
+@app.get("/api/health")
+def health_check():
+    return {
+        "status": "online", 
+        "active_clients": len(manager.active_connections),
+        "database_exists": os.path.exists(DB_NAME)
+    }
+
+@app.get("/api/history")
+def get_history():
+    if not os.path.exists(DB_NAME):
+        return []
+        
+    try:
+        db_uri = f"file:{DB_NAME}?mode=ro"
+        with sqlite3.connect(db_uri, uri=True, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT timestamp, filename, transcript_text FROM transcripts ORDER BY id DESC LIMIT 200")
+            rows = cursor.fetchall()
+            
+        return [{"timestamp": r[0], "filename": r[1], "transcript_text": r[2]} for r in reversed(rows)]
+    except sqlite3.OperationalError as e:
+        logger.error(f"Database read error: {e}")
+        return []
+    except Exception as e:
+        logger.error(f"Unexpected error fetching history: {e}")
+        return []
+
+@app.post("/api/new_transcript")
+async def new_transcript(payload: TranscriptPayload):
+    data = json.dumps({
+        "filename": payload.filename,
+        "transcript_text": payload.transcript_text,
+        "timestamp": payload.timestamp
+    })
+    await manager.broadcast(data)
+    logger.info(f"Broadcasted new transmission: {payload.filename}")
+    return {"status": "success"}
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"WebSocket exception: {e}")
+        manager.disconnect(websocket)
+
+==================================================
+FILE: ./backend/config.py
+==================================================
+import os
+
+# Base paths
+BACKEND_DIR = os.path.abspath(os.path.dirname(__file__))
+PROJECT_ROOT = os.path.dirname(BACKEND_DIR)
+
+# Data paths
+DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+AUDIO_DIR = os.path.join(DATA_DIR, "live_audio")
+DB_NAME = os.path.join(DATA_DIR, "festival_radio.db")
+
+# Ensure data directory exists
+os.makedirs(AUDIO_DIR, exist_ok=True)
+
+==================================================
+FILE: ./scripts/install.command
+==================================================
+#!/bin/bash
+# Move back to the project root directory
+cd "$(dirname "$0")/.."
+
+echo "========================================"
+echo "  RADIO COMMAND CENTER - INSTALLER"
+echo "========================================"
+
+echo "[1/4] Creating data directories..."
+# Update this so it creates the data folder
+mkdir -p data/live_audio
+
+echo "[2/4] Creating Python Virtual Environment..."
+python3 -m venv venv
+
+echo "[3/4] Installing dependencies (this may take a minute)..."
+./venv/bin/pip install --upgrade pip
+./venv/bin/pip install -r requirements.txt
+
+echo "[4/4] Setting permissions so the start button works..."
+# Fix permissions on the script folder
+chmod +x scripts/start.command
+
+echo "========================================"
+echo " INSTALLATION COMPLETE!"
+echo " You can now close this window and double-click 'start.command'"
+echo "========================================"
+
+==================================================
+FILE: ./scripts/start.command
+==================================================
+#!/bin/bash
+# Move back to the project root directory
+cd "$(dirname "$0")/.."
+
+echo "========================================"
+echo "  STARTING RADIO COMMAND CENTER"
+echo "========================================"
+
+VENV_PYTHON="./venv/bin/python"
+VENV_UVICORN="./venv/bin/uvicorn"
+
+# Function to keep the Web Server alive
+run_server() {
+    while true; do
+        echo "[SYSTEM] Starting Web Server on port 8000..."
+        # Notice we are now pointing to backend.server:app
+        $VENV_UVICORN backend.server:app --host 0.0.0.0 --port 8000
+        echo "[SYSTEM] ⚠️ Web Server crashed or stopped! Restarting in 3 seconds..."
+        sleep 3
+    done
+}
+
+# Function to keep the AI Worker alive
+run_worker() {
+    while true; do
+        echo "[SYSTEM] Starting AI Transcription Worker..."
+        # Notice we are now pointing to backend/worker.py
+        $VENV_PYTHON backend/worker.py
+        echo "[SYSTEM] ⚠️ Worker crashed or stopped! Restarting in 3 seconds..."
+        sleep 3
+    done
+}
+
+# Start both processes in the background
+run_server &
+SERVER_PID=$!
+
+run_worker &
+WORKER_PID=$!
+
+# Trap window close / Ctrl+C so it shuts down cleanly
+trap "echo -e '\n[SYSTEM] Shutting down Command Center...'; kill $SERVER_PID $WORKER_PID; exit" SIGINT SIGTERM EXIT
+
+# Keep the script running
+wait
+
+==================================================
+FILE: ./scripts/start.bat
+==================================================
+#!/bin/bash
+
+echo "========================================"
+echo "  STARTING RADIO COMMAND CENTER"
+echo "========================================"
+
+# Use the Python executables directly from the virtual environment
+VENV_PYTHON="./venv/bin/python"
+VENV_UVICORN="./venv/bin/uvicorn"
+
+# Function to keep the Web Server alive
+run_server() {
+    while true; do
+        echo "[SYSTEM] Starting Web Server on port 8000..."
+        $VENV_UVICORN server:app --host 0.0.0.0 --port 8000
+        echo "[SYSTEM] ⚠️ Web Server crashed or stopped! Restarting in 3 seconds..."
+        sleep 3
+    done
+}
+
+# Function to keep the AI Worker alive
+run_worker() {
+    while true; do
+        echo "[SYSTEM] Starting AI Transcription Worker..."
+        $VENV_PYTHON worker.py
+        echo "[SYSTEM] ⚠️ Worker crashed or stopped! Restarting in 3 seconds..."
+        sleep 3
+    done
+}
+
+# Start both processes in the background
+run_server &
+SERVER_PID=$!
+
+run_worker &
+WORKER_PID=$!
+
+# Trap Ctrl+C so you can shut down the whole system cleanly
+trap "echo -e '\n[SYSTEM] Shutting down Command Center...'; kill $SERVER_PID $WORKER_PID; exit" SIGINT SIGTERM
+
+# Keep the script running and wait for user to press Ctrl+C
+wait
+
+==================================================
+FILE: ./scripts/install.bat
+==================================================
+@echo off
+:: Change directory to where the script is located
+cd /d "%~dp0"
+
+:: If this script was called with an argument by itself, route to the correct loop
+if "%1"=="SERVER" goto run_server
+if "%1"=="WORKER" goto run_worker
+
+:: ==========================================
+:: MAIN LAUNCHER WINDOW
+:: ==========================================
+color 0A
+echo ========================================
+echo   STARTING RADIO COMMAND CENTER
+echo ========================================
+echo.
+echo Launching Server and Worker in separate windows...
+echo (To completely shut down the system, close all three windows)
+echo.
+
+:: Start the sub-processes in separate windows by calling this script with arguments
+start "Radio Command - Server" cmd /c "%~f0" SERVER
+start "Radio Command - AI Worker" cmd /c "%~f0" WORKER
+
+echo [SYSTEM] All services launched! 
+echo [SYSTEM] Web Interface is available at: http://localhost:8000
+echo.
+pause
+exit /b
+
+:: ==========================================
+:: SERVER PROCESS LOOP
+:: ==========================================
+:run_server
+:: Light Yellow Text for Server Logs
+color 0E
+:server_loop
+echo [SYSTEM] Starting Web Server on port 8000...
+venv\Scripts\uvicorn.exe server:app --host 0.0.0.0 --port 8000
+echo.
+echo [SYSTEM] WARNING: Web Server crashed or stopped! Restarting in 3 seconds...
+timeout /t 3 /nobreak >nul
+goto server_loop
+
+:: ==========================================
+:: WORKER PROCESS LOOP
+:: ==========================================
+:run_worker
+:: Light Purple Text for Worker Logs
+color 0D
+:worker_loop
+echo [SYSTEM] Starting AI Transcription Worker...
+venv\Scripts\python.exe worker.py
+echo.
+echo [SYSTEM] WARNING: Worker crashed or stopped! Restarting in 3 seconds...
+timeout /t 3 /nobreak >nul
+goto worker_loop

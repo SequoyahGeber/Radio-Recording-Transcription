@@ -1,57 +1,23 @@
 @echo off
-:: Change directory to where the script is located
-cd /d "%~dp0"
+:: Move back to the project root directory
+cd /d "%~dp0\.."
 
-:: If this script was called with an argument by itself, route to the correct loop
-if "%1"=="SERVER" goto run_server
-if "%1"=="WORKER" goto run_worker
-
-:: ==========================================
-:: MAIN LAUNCHER WINDOW
-:: ==========================================
-color 0A
 echo ========================================
-echo   STARTING RADIO COMMAND CENTER
+echo   RADIO COMMAND CENTER - INSTALLER (WIN)
 echo ========================================
-echo.
-echo Launching Server and Worker in separate windows...
-echo (To completely shut down the system, close all three windows)
-echo.
 
-:: Start the sub-processes in separate windows by calling this script with arguments
-start "Radio Command - Server" cmd /c "%~f0" SERVER
-start "Radio Command - AI Worker" cmd /c "%~f0" WORKER
+echo [1/4] Creating data directories...
+if not exist "data\live_audio" mkdir "data\live_audio"
 
-echo [SYSTEM] All services launched! 
-echo [SYSTEM] Web Interface is available at: http://localhost:8000
-echo.
+echo [2/4] Creating Python Virtual Environment...
+python -m venv venv
+
+echo [3/4] Installing dependencies (this may take a minute)...
+venv\Scripts\python.exe -m pip install --upgrade pip
+venv\Scripts\pip.exe install -r requirements.txt
+
+echo ========================================
+echo  INSTALLATION COMPLETE!
+echo  You can now close this window and double-click 'start.bat'
+echo ========================================
 pause
-exit /b
-
-:: ==========================================
-:: SERVER PROCESS LOOP
-:: ==========================================
-:run_server
-:: Light Yellow Text for Server Logs
-color 0E
-:server_loop
-echo [SYSTEM] Starting Web Server on port 8000...
-venv\Scripts\uvicorn.exe server:app --host 0.0.0.0 --port 8000
-echo.
-echo [SYSTEM] WARNING: Web Server crashed or stopped! Restarting in 3 seconds...
-timeout /t 3 /nobreak >nul
-goto server_loop
-
-:: ==========================================
-:: WORKER PROCESS LOOP
-:: ==========================================
-:run_worker
-:: Light Purple Text for Worker Logs
-color 0D
-:worker_loop
-echo [SYSTEM] Starting AI Transcription Worker...
-venv\Scripts\python.exe worker.py
-echo.
-echo [SYSTEM] WARNING: Worker crashed or stopped! Restarting in 3 seconds...
-timeout /t 3 /nobreak >nul
-goto worker_loop
