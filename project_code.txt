@@ -1,6 +1,54 @@
 
 
 ==================================================
+FILE: ./sync.py
+==================================================
+import os
+import time
+import shutil
+from watchdog.observers.polling import PollingObserver as Observer
+from watchdog.events import FileSystemEventHandler
+
+SOURCE_DIR = "/Volumes/Active Recording"
+DEST_DIR = "./data/live_audio"
+
+class FileCopyHandler(FileSystemEventHandler):
+    def on_created(self, event):
+        if event.is_directory:
+            return
+        
+        src_path = os.fsdecode(event.src_path)
+        if src_path.lower().endswith((".mp3", ".wav", ".m4a")):
+            time.sleep(1) 
+            
+            # Preserve the channel subfolder structure
+            rel_path = os.path.relpath(src_path, SOURCE_DIR)
+            dest_path = os.path.join(DEST_DIR, rel_path)
+            
+            # Create the specific channel folder if it does not exist locally
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            
+            try:
+                shutil.copy2(src_path, dest_path)
+                print(f"Copied: {rel_path}")
+            except Exception as e:
+                print(f"Error copying {rel_path}: {e}")
+
+if __name__ == "__main__":
+    os.makedirs(DEST_DIR, exist_ok=True)
+    observer = Observer()
+    observer.schedule(FileCopyHandler(), SOURCE_DIR, recursive=True)
+    observer.start()
+    print(f"Watching '{SOURCE_DIR}' for new files via polling...")
+    
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+    observer.join()
+
+==================================================
 FILE: ./requirements.txt
 ==================================================
 fastapi
@@ -1562,21 +1610,34 @@ run_worker() {
     while true; do
         echo "[SYSTEM] Starting AI Transcription Worker..."
         # Notice we are now pointing to backend/worker.py
-        $VENV_PYTHON backend/worker.py
+        $VENV_PYTHON -m backend.worker
         echo "[SYSTEM] ⚠️ Worker crashed or stopped! Restarting in 3 seconds..."
         sleep 3
     done
 }
 
-# Start both processes in the background
+# Function to keep the Network Sync Worker alive
+run_sync() {
+    while true; do
+        echo "[SYSTEM] Starting Network Sync Worker..."
+        $VENV_PYTHON sync.py
+        echo "[SYSTEM] ⚠️ Sync Worker crashed or stopped! Restarting in 3 seconds..."
+        sleep 3
+    done
+}
+
+# Start all processes in the background
 run_server &
 SERVER_PID=$!
 
 run_worker &
 WORKER_PID=$!
 
+run_sync &
+SYNC_PID=$!
+
 # Trap window close / Ctrl+C so it shuts down cleanly
-trap "echo -e '\n[SYSTEM] Shutting down Command Center...'; kill $SERVER_PID $WORKER_PID; exit" SIGINT SIGTERM EXIT
+trap "echo -e '\n[SYSTEM] Shutting down Command Center...'; kill $SERVER_PID $WORKER_PID $SYNC_PID; exit" SIGINT SIGTERM EXIT
 
 # Keep the script running
 wait
@@ -1584,55 +1645,9 @@ wait
 ==================================================
 FILE: ./scripts/start.bat
 ==================================================
-#!/bin/bash
-
-echo "========================================"
-echo "  STARTING RADIO COMMAND CENTER"
-echo "========================================"
-
-# Use the Python executables directly from the virtual environment
-VENV_PYTHON="./venv/bin/python"
-VENV_UVICORN="./venv/bin/uvicorn"
-
-# Function to keep the Web Server alive
-run_server() {
-    while true; do
-        echo "[SYSTEM] Starting Web Server on port 8000..."
-        $VENV_UVICORN server:app --host 0.0.0.0 --port 8000
-        echo "[SYSTEM] ⚠️ Web Server crashed or stopped! Restarting in 3 seconds..."
-        sleep 3
-    done
-}
-
-# Function to keep the AI Worker alive
-run_worker() {
-    while true; do
-        echo "[SYSTEM] Starting AI Transcription Worker..."
-        $VENV_PYTHON worker.py
-        echo "[SYSTEM] ⚠️ Worker crashed or stopped! Restarting in 3 seconds..."
-        sleep 3
-    done
-}
-
-# Start both processes in the background
-run_server &
-SERVER_PID=$!
-
-run_worker &
-WORKER_PID=$!
-
-# Trap Ctrl+C so you can shut down the whole system cleanly
-trap "echo -e '\n[SYSTEM] Shutting down Command Center...'; kill $SERVER_PID $WORKER_PID; exit" SIGINT SIGTERM
-
-# Keep the script running and wait for user to press Ctrl+C
-wait
-
-==================================================
-FILE: ./scripts/install.bat
-==================================================
 @echo off
-:: Change directory to where the script is located
-cd /d "%~dp0"
+:: Move back to the project root directory
+cd /d "%~dp0\.."
 
 :: If this script was called with an argument by itself, route to the correct loop
 if "%1"=="SERVER" goto run_server
@@ -1651,8 +1666,8 @@ echo (To completely shut down the system, close all three windows)
 echo.
 
 :: Start the sub-processes in separate windows by calling this script with arguments
-start "Radio Command - Server" cmd /c "%~f0" SERVER
-start "Radio Command - AI Worker" cmd /c "%~f0" WORKER
+start "Radio Command - Server" cmd /c "scripts\start.bat SERVER"
+start "Radio Command - AI Worker" cmd /c "scripts\start.bat WORKER"
 
 echo [SYSTEM] All services launched! 
 echo [SYSTEM] Web Interface is available at: http://localhost:8000
@@ -1668,7 +1683,7 @@ exit /b
 color 0E
 :server_loop
 echo [SYSTEM] Starting Web Server on port 8000...
-venv\Scripts\uvicorn.exe server:app --host 0.0.0.0 --port 8000
+venv\Scripts\uvicorn.exe backend.server:app --host 0.0.0.0 --port 8000
 echo.
 echo [SYSTEM] WARNING: Web Server crashed or stopped! Restarting in 3 seconds...
 timeout /t 3 /nobreak >nul
@@ -1682,8 +1697,35 @@ goto server_loop
 color 0D
 :worker_loop
 echo [SYSTEM] Starting AI Transcription Worker...
-venv\Scripts\python.exe worker.py
+venv\Scripts\python.exe backend\worker.py
 echo.
 echo [SYSTEM] WARNING: Worker crashed or stopped! Restarting in 3 seconds...
 timeout /t 3 /nobreak >nul
 goto worker_loop
+
+==================================================
+FILE: ./scripts/install.bat
+==================================================
+@echo off
+:: Move back to the project root directory
+cd /d "%~dp0\.."
+
+echo ========================================
+echo   RADIO COMMAND CENTER - INSTALLER (WIN)
+echo ========================================
+
+echo [1/4] Creating data directories...
+if not exist "data\live_audio" mkdir "data\live_audio"
+
+echo [2/4] Creating Python Virtual Environment...
+python -m venv venv
+
+echo [3/4] Installing dependencies (this may take a minute)...
+venv\Scripts\python.exe -m pip install --upgrade pip
+venv\Scripts\pip.exe install -r requirements.txt
+
+echo ========================================
+echo  INSTALLATION COMPLETE!
+echo  You can now close this window and double-click 'start.bat'
+echo ========================================
+pause

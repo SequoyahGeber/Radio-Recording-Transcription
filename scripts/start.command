@@ -25,21 +25,34 @@ run_worker() {
     while true; do
         echo "[SYSTEM] Starting AI Transcription Worker..."
         # Notice we are now pointing to backend/worker.py
-        $VENV_PYTHON backend/worker.py
+        $VENV_PYTHON -m backend.worker
         echo "[SYSTEM] ⚠️ Worker crashed or stopped! Restarting in 3 seconds..."
         sleep 3
     done
 }
 
-# Start both processes in the background
+# Function to keep the Network Sync Worker alive
+run_sync() {
+    while true; do
+        echo "[SYSTEM] Starting Network Sync Worker..."
+        $VENV_PYTHON sync.py
+        echo "[SYSTEM] ⚠️ Sync Worker crashed or stopped! Restarting in 3 seconds..."
+        sleep 3
+    done
+}
+
+# Start all processes in the background
 run_server &
 SERVER_PID=$!
 
 run_worker &
 WORKER_PID=$!
 
+run_sync &
+SYNC_PID=$!
+
 # Trap window close / Ctrl+C so it shuts down cleanly
-trap "echo -e '\n[SYSTEM] Shutting down Command Center...'; kill $SERVER_PID $WORKER_PID; exit" SIGINT SIGTERM EXIT
+trap "echo -e '\n[SYSTEM] Shutting down Command Center...'; kill $SERVER_PID $WORKER_PID $SYNC_PID; exit" SIGINT SIGTERM EXIT
 
 # Keep the script running
 wait
