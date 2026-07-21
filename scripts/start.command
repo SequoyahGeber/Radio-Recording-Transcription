@@ -1,6 +1,6 @@
 #!/bin/bash
-# This magic line ensures the script runs in the folder it's located in
-cd "$(dirname "$0")"
+# Move back to the project root directory
+cd "$(dirname "$0")/.."
 
 echo "========================================"
 echo "  STARTING RADIO COMMAND CENTER"
@@ -13,7 +13,8 @@ VENV_UVICORN="./venv/bin/uvicorn"
 run_server() {
     while true; do
         echo "[SYSTEM] Starting Web Server on port 8000..."
-        $VENV_UVICORN server:app --host 0.0.0.0 --port 8000
+        # Notice we are now pointing to backend.server:app
+        $VENV_UVICORN backend.server:app --host 0.0.0.0 --port 8000
         echo "[SYSTEM] ⚠️ Web Server crashed or stopped! Restarting in 3 seconds..."
         sleep 3
     done
@@ -23,7 +24,8 @@ run_server() {
 run_worker() {
     while true; do
         echo "[SYSTEM] Starting AI Transcription Worker..."
-        $VENV_PYTHON worker.py
+        # Notice we are now pointing to backend/worker.py
+        $VENV_PYTHON backend/worker.py
         echo "[SYSTEM] ⚠️ Worker crashed or stopped! Restarting in 3 seconds..."
         sleep 3
     done

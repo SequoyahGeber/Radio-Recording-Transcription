@@ -9,6 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
 
+# Import paths from config
+from backend.config import PROJECT_ROOT, AUDIO_DIR, DB_NAME
+
 # --- SETUP LOGGING ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -24,12 +27,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- CONFIGURATION ---
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-AUDIO_DIR = os.path.join(BASE_DIR, "live_audio")
-DB_NAME = os.path.join(BASE_DIR, "festival_radio.db")
-
-os.makedirs(AUDIO_DIR, exist_ok=True)
+# --- STATIC FILES ---
+# Mount frontend folder so HTML can access CSS/JS
+app.mount("/static", StaticFiles(directory=os.path.join(PROJECT_ROOT, "frontend")), name="static")
+# Mount the audio files
 app.mount("/audio", StaticFiles(directory=AUDIO_DIR), name="audio")
 
 # --- WEBSOCKET MANAGER ---
@@ -69,7 +70,7 @@ class TranscriptPayload(BaseModel):
 # --- ROUTES ---
 @app.get("/")
 async def get():
-    html_path = os.path.join(BASE_DIR, "index.html")
+    html_path = os.path.join(PROJECT_ROOT, "frontend", "index.html")
     if not os.path.exists(html_path):
         return HTMLResponse("<h1>Error: index.html not found!</h1>", status_code=404)
     with open(html_path, "r", encoding="utf-8") as f:

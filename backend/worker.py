@@ -10,10 +10,11 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from faster_whisper import WhisperModel
 
+# Import paths from config instead of hardcoding
+from backend.config import AUDIO_DIR, DB_NAME
+
 # --- CONFIGURATION ---
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-FOLDER_TO_WATCH = os.path.join(BASE_DIR, "live_audio")
-DB_NAME = os.path.join(BASE_DIR, "festival_radio.db")
+FOLDER_TO_WATCH = AUDIO_DIR
 MODEL_SIZE = "small"
 SERVER_URL = "http://127.0.0.1:8000/api/new_transcript"
 MAX_WORKERS = 3       
@@ -25,9 +26,6 @@ RETRY_DELAY = 10.0
 error_lock = Lock()
 consecutive_errors = 0
 MAX_CONSECUTIVE_ERRORS = 10 
-
-if not os.path.exists(FOLDER_TO_WATCH):
-    os.makedirs(FOLDER_TO_WATCH)
 
 def setup_database():
     conn = sqlite3.connect(DB_NAME)
@@ -104,7 +102,7 @@ def process_task(item):
         
         segments, _ = model.transcribe(filepath, beam_size=5, vad_filter=False, language="en", condition_on_previous_text=False)
         
-        # [MODIFIED] Strips internal timestamps and just outputs pure readable text
+        # Strips internal timestamps and just outputs pure readable text
         full_transcript = " ".join([s.text.strip() for s in segments])
         
         end_time = time.time()
