@@ -15,7 +15,7 @@ from backend.config import AUDIO_DIR, DB_NAME
 
 # --- CONFIGURATION ---
 FOLDER_TO_WATCH = AUDIO_DIR
-MODEL_SIZE = "small"
+MODEL_SIZE = "medium"
 SERVER_URL = "http://127.0.0.1:8000/api/new_transcript"
 MAX_WORKERS = 3       
 

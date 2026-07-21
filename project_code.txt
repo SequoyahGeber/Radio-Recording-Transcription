@@ -18,7 +18,9 @@ class FileCopyHandler(FileSystemEventHandler):
             return
         
         src_path = os.fsdecode(event.src_path)
-        if src_path.lower().endswith((".mp3", ".wav", ".m4a")):
+        
+        # Only process files after they have been transcoded to mp3
+        if src_path.lower().endswith(".mp3"):
             time.sleep(1) 
             
             # Preserve the channel subfolder structure
