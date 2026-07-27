@@ -34,9 +34,9 @@ detects Homebrew's linked and versioned Python locations and installs
 3. Choose the recording folder. Mounted SMB shares under `/Volumes` are supported.
 4. Open **Radio Command Center**. Services start automatically and the secure
    dashboard loads directly inside the app.
-5. Use the initial administrator login saved to
-   `Desktop/Radio Dashboard Login.txt`.
-6. Trust `Desktop/Radio Dashboard CA Certificate.crt` on authorized devices.
+5. On first launch, enter your name and choose an administrator username and
+   password. The app signs you in when setup is complete.
+6. Add dashboard-only profiles from **Access Profiles** as needed.
 
 The original `Start Radio Command Center.command` remains available as a
 terminal-based launcher.
@@ -49,9 +49,10 @@ terminal-based launcher.
 - **Administrator:** supervisor access plus profile management, program console,
   and native transcription-service controls.
 
-The first generated `operator` profile is an administrator. Administrators can
-add or update profiles from the dashboard control bar. At least one active
-administrator is always required.
+The first-launch setup creates the administrator profile. It is available only
+until that first profile has been saved, so setup cannot be repeated to replace
+an existing administrator. Administrators can add or update profiles from the
+dashboard control bar. At least one active administrator is always required.
 
 ## Transcript quality
 
@@ -92,11 +93,10 @@ remain excluded from source control.
 
 ## Deployment
 
-Radio Command Center uses one administrator Mac as the transcription host. Run
-`scripts/install.command` once on that Mac, then opening the app is a one-click
-daily launch. The administrator installation is not currently a standalone
-drag-and-drop app because its Python environment and Whisper model are several
-gigabytes and remain in the project folder.
+Radio Command Center uses one administrator Mac as the transcription host. The
+packaged DMG provides a drag-and-drop application containing its Python runtime,
+transcription dependencies, and MLX model. After the one-time administrator
+setup, opening the app is a one-click daily launch.
 
 Viewer, operator, and supervisor profiles do not need the transcription
 software. They connect to the administrator host's secure dashboard in a web

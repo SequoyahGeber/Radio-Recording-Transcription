@@ -25,7 +25,7 @@ os.environ["RADIO_HOST"] = "127.0.0.1"
 from fastapi.testclient import TestClient
 from backend.config import LOG_DIR
 from backend.database import connect
-from backend.security import hash_password, save_security_config
+from backend.security import hash_password, load_security_config, save_security_config
 
 
 salt, password_digest = hash_password("admin-password")
@@ -157,6 +157,65 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertFalse(profile.json()["permissions"]["console"])
         self.assertEqual(operator.get("/api/history").status_code, 200)
         self.assertEqual(operator.get("/api/console").status_code, 403)
+
+    def test_first_run_setup_creates_only_one_administrator(self):
+        original_config = load_security_config()
+        try:
+            fresh_config = dict(original_config)
+            fresh_config["users"] = []
+            save_security_config(fresh_config)
+
+            fresh_client = TestClient(
+                app,
+                base_url="https://127.0.0.1",
+                follow_redirects=False,
+            )
+            dashboard = fresh_client.get(
+                "/",
+                headers={"Accept": "text/html"},
+            )
+            self.assertEqual(dashboard.status_code, 303)
+            self.assertEqual(dashboard.headers["location"], "/setup")
+            self.assertEqual(fresh_client.get("/setup").status_code, 200)
+            self.assertEqual(
+                fresh_client.post(
+                    "/api/setup",
+                    json={
+                        "display_name": "Too Short",
+                        "username": "admin",
+                        "password": "short",
+                    },
+                ).status_code,
+                400,
+            )
+
+            setup = fresh_client.post(
+                "/api/setup",
+                json={
+                    "display_name": "Festival Administrator",
+                    "username": "festival-admin",
+                    "password": "a-secure-password",
+                },
+            )
+            self.assertEqual(setup.status_code, 200)
+            self.assertIn("radio_session", setup.cookies)
+
+            profile = fresh_client.get("/api/me")
+            self.assertEqual(profile.status_code, 200)
+            self.assertEqual(profile.json()["username"], "festival-admin")
+            self.assertEqual(profile.json()["role"], "admin")
+
+            repeated = fresh_client.post(
+                "/api/setup",
+                json={
+                    "display_name": "Second Administrator",
+                    "username": "second-admin",
+                    "password": "another-secure-password",
+                },
+            )
+            self.assertEqual(repeated.status_code, 409)
+        finally:
+            save_security_config(original_config)
 
     def test_internal_delivery_requires_private_token(self):
         payload = {

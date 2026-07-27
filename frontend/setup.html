@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Welcome | Radio Command Center</title>
+    <link rel="stylesheet" href="/static/css/style.css?v=20260727-3" />
+  </head>
+  <body class="login-body">
+    <main class="login-shell">
+      <section class="login-card setup-card" aria-labelledby="setup-title">
+        <div class="login-mark"><span class="live-pulse"></span></div>
+        <p class="login-eyebrow">First-time setup</p>
+        <h1 id="setup-title">Welcome to Radio Command Center</h1>
+        <p class="login-copy">
+          Create the administrator account for this Mac. You can add dashboard-only
+          profiles after signing in.
+        </p>
+        <form id="setup-form">
+          <label for="setup-display-name">Administrator name</label>
+          <input
+            id="setup-display-name"
+            name="display_name"
+            autocomplete="name"
+            maxlength="100"
+            placeholder="Your name"
+            required
+          />
+
+          <label for="setup-username">Username</label>
+          <input
+            id="setup-username"
+            name="username"
+            autocomplete="username"
+            minlength="3"
+            maxlength="64"
+            pattern="[A-Za-z0-9._-]+"
+            placeholder="admin"
+            required
+          />
+
+          <label for="setup-password">Password</label>
+          <input
+            id="setup-password"
+            name="password"
+            type="password"
+            autocomplete="new-password"
+            minlength="12"
+            required
+          />
+          <p class="setup-hint">Use at least 12 characters.</p>
+
+          <label for="setup-password-confirm">Confirm password</label>
+          <input
+            id="setup-password-confirm"
+            name="password_confirm"
+            type="password"
+            autocomplete="new-password"
+            minlength="12"
+            required
+          />
+
+          <button class="btn btn-primary login-submit" type="submit">
+            Create administrator
+          </button>
+          <p id="setup-error" class="login-error" role="alert" hidden></p>
+        </form>
+        <div class="login-security-note">
+          Stored securely on this Mac · No default password
+        </div>
+      </section>
+    </main>
+    <script src="/static/js/setup.js?v=20260727-3"></script>
+  </body>
+</html>

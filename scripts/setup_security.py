@@ -157,7 +157,7 @@ def main():
                 "password_hash": config["password_hash"],
             }
         ]
-    if not existing_users or args.reset_password:
+    if args.reset_password:
         password = secrets.token_urlsafe(18)
         salt = secrets.token_bytes(16)
         if not existing_users:
@@ -178,6 +178,10 @@ def main():
                 "password_hash": encode(password_hash(password, salt)),
             }
         )
+        config["users"] = existing_users
+    elif not existing_users:
+        config["users"] = []
+    else:
         config["users"] = existing_users
 
     config["session_secret"] = config.get(

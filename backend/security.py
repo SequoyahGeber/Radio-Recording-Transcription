@@ -14,6 +14,7 @@ from backend.config import SECURITY_CONFIG_PATH
 SESSION_COOKIE = "radio_session"
 SESSION_SECONDS = 12 * 60 * 60
 _config_lock = threading.Lock()
+_setup_lock = threading.Lock()
 _config_cache = None
 _config_mtime = None
 ROLE_LEVELS = {
@@ -105,6 +106,10 @@ def list_users():
             }
         )
     return result
+
+
+def setup_required():
+    return not _configured_users(load_security_config())
 
 
 def find_user(username):
@@ -241,3 +246,38 @@ def upsert_user(username, display_name, role, password=None, active=True):
         config.pop(legacy_key, None)
     save_security_config(config)
     return next(user for user in list_users() if user["username"] == username)
+
+
+def create_initial_admin(username, display_name, password):
+    username = (username or "").strip()
+    display_name = (display_name or "").strip()
+    if not 3 <= len(username) <= 64:
+        raise ValueError("Username must contain between 3 and 64 characters")
+    if not all(character.isalnum() or character in "._-" for character in username):
+        raise ValueError("Username may only contain letters, numbers, dots, dashes, and underscores")
+    if not display_name:
+        raise ValueError("Administrator name is required")
+    if len(display_name) > 100:
+        raise ValueError("Administrator name must contain 100 characters or fewer")
+    if len(password or "") < 12:
+        raise ValueError("Password must contain at least 12 characters")
+
+    with _setup_lock:
+        config = load_security_config()
+        if _configured_users(config):
+            raise ValueError("Initial setup has already been completed")
+        salt, digest = hash_password(password)
+        config["users"] = [
+            {
+                "username": username,
+                "display_name": display_name,
+                "role": "admin",
+                "active": True,
+                "password_salt": salt,
+                "password_hash": digest,
+            }
+        ]
+        for legacy_key in ("username", "password_salt", "password_hash"):
+            config.pop(legacy_key, None)
+        save_security_config(config)
+    return list_users()[0]

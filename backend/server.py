@@ -31,9 +31,11 @@ from backend.security import (
     SESSION_COOKIE,
     SESSION_SECONDS,
     authenticate_user,
+    create_initial_admin,
     create_session_token,
     list_users,
     role_allows,
+    setup_required,
     upsert_user,
     validate_session_token,
     verify_internal_token,
@@ -129,6 +131,12 @@ class LoginPayload(BaseModel):
     password: str
 
 
+class SetupPayload(BaseModel):
+    display_name: str
+    username: str
+    password: str
+
+
 class TranscriptUpdatePayload(BaseModel):
     reviewed: Optional[bool] = None
     bookmarked: Optional[bool] = None
@@ -179,11 +187,22 @@ def wants_html(request):
 async def authentication_and_headers(request: Request, call_next):
     path = request.url.path
     is_public = path == "/login" or path == "/api/login" or path.startswith("/static/")
+    is_setup_public = path == "/setup" or path == "/api/setup"
     is_internal = path in {"/api/new_transcript", "/api/internal/heartbeat"}
 
     if is_internal:
         if not verify_internal_token(request.headers.get("X-Radio-Internal-Token")):
             return secure_headers(JSONResponse({"detail": "Forbidden"}, status_code=403))
+    elif setup_required():
+        if not is_setup_public and not path.startswith("/static/"):
+            if wants_html(request) and not path.startswith("/api/"):
+                return secure_headers(RedirectResponse("/setup", status_code=303))
+            return secure_headers(
+                JSONResponse(
+                    {"detail": "Administrator setup is required."},
+                    status_code=409,
+                )
+            )
     elif not is_public:
         session = get_session(request)
         if not session:
@@ -515,9 +534,42 @@ app.mount("/audio", StaticFiles(directory=AUDIO_DIR), name="audio")
 
 @app.get("/login")
 async def login_page(request: Request):
+    if setup_required():
+        return RedirectResponse("/setup", status_code=303)
     if get_session(request):
         return RedirectResponse("/", status_code=303)
     return read_html("login.html")
+
+
+@app.get("/setup")
+async def setup_page():
+    if not setup_required():
+        return RedirectResponse("/login", status_code=303)
+    return read_html("setup.html")
+
+
+@app.post("/api/setup")
+async def initial_setup(payload: SetupPayload):
+    try:
+        user = create_initial_admin(
+            payload.username,
+            payload.display_name,
+            payload.password,
+        )
+    except ValueError as exc:
+        status_code = 409 if "already been completed" in str(exc) else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    response = JSONResponse({"status": "success"})
+    response.set_cookie(
+        SESSION_COOKIE,
+        create_session_token(user),
+        max_age=SESSION_SECONDS,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        path="/",
+    )
+    return response
 
 
 @app.post("/api/login")
