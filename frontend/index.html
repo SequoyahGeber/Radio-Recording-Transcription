@@ -5,56 +5,124 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Radio Command Center | Live Ops</title>
 
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
-      rel="stylesheet"
-    />
-
-    <!-- Link to our separated CSS file -->
-    <link rel="stylesheet" href="/static/css/style.css" />
+    <link rel="stylesheet" href="/static/css/style.css?v=20260726-1" />
   </head>
   <body>
     <nav id="sidebar">
+      <button
+        id="sidebar-collapse-btn"
+        class="sidebar-collapse-btn"
+        type="button"
+        aria-controls="sidebar"
+        aria-expanded="true"
+        aria-label="Collapse sidebar"
+        title="Collapse sidebar"
+      >
+        <span aria-hidden="true">&#x276E;</span>
+      </button>
+
       <div class="brand-header">
         <div class="live-pulse"></div>
-        Ops Command
+        <div class="brand-copy">
+          <span>Ops Command</span>
+          <small>Live radio operations</small>
+        </div>
+      </div>
+
+      <section class="ops-overview" aria-label="System status">
+        <div class="ops-status-row">
+          <span><span id="connection-dot" class="status-dot"></span><span id="connection-label">Connecting securely…</span></span>
+          <span id="active-operators">— operators</span>
+        </div>
+        <div class="ops-metrics">
+          <div><strong id="metric-backlog">—</strong><span>Backlog</span></div>
+          <div><strong id="metric-rate">—</strong><span>Per min</span></div>
+          <div><strong id="metric-eta">—</strong><span>ETA</span></div>
+        </div>
+        <div id="engine-status" class="engine-status">Medium model · checking engine…</div>
+        <div id="service-status" class="service-status">Checking worker services…</div>
+      </section>
+
+      <div class="sidebar-section search-section">
+        <div class="section-title section-title-row">
+          <span>Search</span>
+          <kbd>/</kbd>
+        </div>
+        <div class="global-search-wrap">
+          <svg aria-hidden="true" viewBox="0 0 24 24">
+            <path d="m21 21-4.35-4.35m2.35-5.65a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z"></path>
+          </svg>
+          <input
+            type="search"
+            id="global-search"
+            placeholder="Search the complete archive..."
+            aria-label="Search all feeds"
+          />
+          <button
+            id="clear-global-search"
+            type="button"
+            aria-label="Clear search"
+            title="Clear search"
+            hidden
+          >
+            &times;
+          </button>
+        </div>
+        <div id="search-status" class="search-status" aria-live="polite">
+          Loading transmissions...
+        </div>
       </div>
 
       <div class="sidebar-section">
         <div class="section-title">Display Settings</div>
         <label class="checkbox-label">
           <div class="checkbox-inner">
-            <input
-              type="checkbox"
-              onchange="
-                document.body.classList.toggle('compact-mode', this.checked)
-              "
-            />
+            <input type="checkbox" id="compact-mode-toggle" />
             Compact Data View
+          </div>
+        </label>
+        <label class="checkbox-label">
+          <div class="checkbox-inner">
+            <input type="checkbox" id="notification-toggle" />
+            Emergency Notifications
+          </div>
+        </label>
+        <label id="suspect-toggle-row" class="checkbox-label" hidden>
+          <div class="checkbox-inner">
+            <input type="checkbox" id="suspect-toggle" />
+            Show Suspect Transcripts
+          </div>
+        </label>
+        <label class="checkbox-label">
+          <div class="checkbox-inner">
+            <input type="checkbox" id="bookmarks-only-toggle" />
+            Bookmarks Only
           </div>
         </label>
       </div>
 
       <div class="sidebar-section">
-        <div class="section-title">Alert Keywords</div>
+        <div class="section-title section-title-row">
+          <span>Emergency Highlights</span>
+          <span id="keyword-count" class="section-count"></span>
+        </div>
         <input
           type="text"
           id="new-keyword"
           placeholder="Add keyword + Enter"
-          onkeypress="addKeyword(event)"
-          class="search-input"
-          style="margin-bottom: 12px"
+          class="search-input keyword-input"
         />
-        <div
-          id="keyword-list"
-          style="display: flex; flex-wrap: wrap; gap: 6px"
-        ></div>
+        <div id="keyword-list" class="keyword-list"></div>
       </div>
 
       <div class="sidebar-section">
-        <div class="section-title">Global Time Filter</div>
+        <div class="section-title">Date &amp; Time</div>
+        <input
+          type="date"
+          id="filter-date"
+          class="search-input"
+          aria-label="Recording Date"
+        />
         <select
           id="filter-start"
           class="search-input"
@@ -65,50 +133,59 @@
           class="search-input"
           aria-label="End Time"
         ></select>
-        <div style="display: flex; gap: 8px">
-          <button class="btn" style="flex: 1" onclick="applyTimeFilter()">
-            Filter
+        <div class="filter-actions">
+          <button id="apply-date-filter" class="btn">
+            Apply
           </button>
           <button
-            class="btn"
-            style="flex: 1; background: transparent"
-            onclick="clearTimeFilter()"
+            id="clear-date-filter"
+            class="btn btn-quiet"
           >
             Clear
           </button>
         </div>
       </div>
 
-      <div class="sidebar-section" style="flex: 1">
+      <div class="sidebar-section feeds-section">
         <div class="section-title">Active Feeds</div>
         <div class="toggle-group" id="channel-toggles"></div>
       </div>
 
-      <button class="btn btn-primary" onclick="exportCSV()">
-        <svg
-          width="16"
-          height="16"
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-          xmlns="http://www.w3.org/2000/svg"
-        >
-          <path
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            stroke-width="2"
-            d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
-          ></path>
-        </svg>
-        Export CSV Log
-      </button>
+      <div id="profile-admin-section" class="sidebar-section" hidden>
+        <div class="section-title">Access Profiles</div>
+        <div id="profile-list" class="profile-list"></div>
+        <input id="profile-username" class="search-input" placeholder="Username" />
+        <input id="profile-display-name" class="search-input" placeholder="Display name" />
+        <input id="profile-password" class="search-input" type="password" placeholder="New password" />
+        <select id="profile-role" class="search-input">
+          <option value="viewer">Viewer · transcript only</option>
+          <option value="operator">Operator · audio and review</option>
+          <option value="supervisor">Supervisor · correct and export</option>
+          <option value="admin">Admin · manage profiles</option>
+        </select>
+        <label class="checkbox-label">
+          <div class="checkbox-inner">
+            <input id="profile-active" type="checkbox" checked />
+            Profile Active
+          </div>
+        </label>
+        <button id="save-profile" class="btn">Save Profile</button>
+      </div>
+
+      <div class="sidebar-footer">
+        <button id="export-csv" class="btn btn-primary">Export CSV Log</button>
+        <div id="current-profile" class="current-profile">Loading profile…</div>
+        <button id="logout-button" class="btn btn-quiet">Sign out</button>
+      </div>
     </nav>
 
-    <main id="dashboard"></main>
+    <main id="dashboard" aria-label="Radio transcript feeds"></main>
+    <div id="empty-state" class="empty-state" hidden>
+      <strong>No matching transmissions</strong>
+      <span>Try a broader search or clear the date and time filter.</span>
+    </div>
     <div id="toast-container"></div>
 
-    <!-- Link to our separated JS file -->
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/app.js?v=20260726-1"></script>
   </body>
 </html>
-  

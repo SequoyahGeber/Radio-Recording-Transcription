@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+
+SCRIPT_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if SCRIPT_PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, SCRIPT_PROJECT_ROOT)
+
+from backend.config import PROJECT_ROOT, RADIO_HOST, RADIO_PORT, RUNTIME_DIR, save_settings
+
+
+PID_PATH = os.path.join(RUNTIME_DIR, "supervisor.pid")
+SUPERVISOR_PATH = os.path.join(PROJECT_ROOT, "scripts", "supervisor.py")
+
+
+def read_pid():
+    try:
+        with open(PID_PATH, "r", encoding="utf-8") as handle:
+            return int(handle.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def process_is_running(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def status():
+    pid = read_pid()
+    running = process_is_running(pid)
+    return {
+        "running": running,
+        "pid": pid if running else None,
+        "host": RADIO_HOST,
+        "port": RADIO_PORT,
+        "dashboard": f"https://{RADIO_HOST}:{RADIO_PORT}",
+    }
+
+
+def start():
+    current = status()
+    if current["running"]:
+        return current
+    os.makedirs(RUNTIME_DIR, exist_ok=True)
+    launcher_log = open(
+        os.path.join(RUNTIME_DIR, "supervisor-launch.log"),
+        "a",
+        encoding="utf-8",
+    )
+    subprocess.Popen(
+        [sys.executable, SUPERVISOR_PATH],
+        cwd=PROJECT_ROOT,
+        stdout=launcher_log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        current = status()
+        if current["running"]:
+            return current
+        time.sleep(0.2)
+    raise RuntimeError("The service supervisor did not start")
+
+
+def stop():
+    pid = read_pid()
+    if not process_is_running(pid):
+        return status()
+    os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        if not process_is_running(pid):
+            break
+        time.sleep(0.2)
+    if process_is_running(pid):
+        raise RuntimeError("The service supervisor did not stop")
+    return status()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("action", choices=["start", "stop", "restart", "status", "configure"])
+    parser.add_argument("--source")
+    parser.add_argument("--host")
+    parser.add_argument("--port", type=int)
+    args = parser.parse_args()
+
+    if args.action == "configure":
+        updates = {}
+        if args.source:
+            source = os.path.abspath(args.source)
+            if not os.path.isdir(source):
+                raise RuntimeError("The selected recording folder is not available")
+            updates["source_dir"] = source
+        if args.host:
+            updates["host"] = args.host
+        if args.port:
+            updates["port"] = args.port
+        result = {"settings": save_settings(updates), "restart_required": True}
+    elif args.action == "start":
+        result = start()
+    elif args.action == "stop":
+        result = stop()
+    elif args.action == "restart":
+        stop()
+        result = start()
+    else:
+        result = status()
+    print(json.dumps(result, sort_keys=True))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        print(json.dumps({"error": str(exc)}))
+        sys.exit(1)
