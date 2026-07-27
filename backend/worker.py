@@ -153,7 +153,6 @@ def transcribe_audio(filepath):
                 language="en",
                 condition_on_previous_text=False,
                 temperature=(0.0, 0.2, 0.4),
-                beam_size=5,
                 compression_ratio_threshold=2.2,
                 logprob_threshold=-0.9,
                 no_speech_threshold=0.7,
