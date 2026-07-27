@@ -5,7 +5,8 @@ cd "$(dirname "$0")/.."
 
 APP_NAME="Radio Command Center"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' macos/Info.plist)"
-DMG_PATH="$PWD/dist/Radio-Command-Center-${VERSION}-arm64.dmg"
+RELEASE_VERSION="${RELEASE_VERSION:-$VERSION}"
+DMG_PATH="$PWD/dist/Radio-Command-Center-${RELEASE_VERSION}-arm64.dmg"
 STAGING_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/radio-command-center-dmg.XXXXXX")"
 STAGING_DIR="$STAGING_ROOT/$APP_NAME"
 

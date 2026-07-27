@@ -59,6 +59,12 @@ ditto frontend "$RUNTIME_DIR/frontend"
 ditto scripts "$RUNTIME_DIR/scripts"
 ditto models "$RUNTIME_DIR/models"
 ditto "$SITE_PACKAGES_SOURCE" "$RUNTIME_DIR/site-packages"
+# mlx-whisper declares PyTorch for an optional conversion helper, but the app's
+# native MLX transcription path does not import it. Excluding it keeps the
+# self-contained release below GitHub's release-asset size ceiling.
+find "$RUNTIME_DIR/site-packages" -maxdepth 1 \
+    \( -name 'torch' -o -name 'torch-*.dist-info' -o -name 'torchgen' \) \
+    -exec rm -rf {} +
 cp sync.py "$RUNTIME_DIR/sync.py"
 ditto "$PYTHON_FRAMEWORK_SOURCE" "$PYTHON_FRAMEWORK_DESTINATION"
 
