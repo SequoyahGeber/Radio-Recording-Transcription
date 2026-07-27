@@ -1,14 +1,50 @@
 import json
 import os
+import shutil
+import sys
 import tempfile
 
 # Base paths
 BACKEND_DIR = os.path.abspath(os.path.dirname(__file__))
 PROJECT_ROOT = os.path.dirname(BACKEND_DIR)
+LEGACY_DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+
+
+def default_data_dir():
+    if sys.platform == "darwin":
+        return os.path.expanduser(
+            os.path.join("~", "Library", "Application Support", "Radio Command Center")
+        )
+    return LEGACY_DATA_DIR
+
 
 DATA_DIR = os.path.abspath(
-    os.environ.get("RADIO_DATA_DIR", os.path.join(PROJECT_ROOT, "data"))
+    os.environ.get("RADIO_DATA_DIR", default_data_dir())
 )
+
+
+def migrate_legacy_data():
+    """Copy an existing project-local data directory to writable app storage once."""
+    if (
+        os.environ.get("RADIO_DATA_DIR")
+        or DATA_DIR == LEGACY_DATA_DIR
+        or os.path.exists(DATA_DIR)
+        or not os.path.isdir(LEGACY_DATA_DIR)
+    ):
+        return
+
+    os.makedirs(os.path.dirname(DATA_DIR), exist_ok=True)
+    migration_path = f"{DATA_DIR}.migrating-{os.getpid()}"
+    try:
+        shutil.copytree(LEGACY_DATA_DIR, migration_path)
+        os.replace(migration_path, DATA_DIR)
+    except Exception:
+        shutil.rmtree(migration_path, ignore_errors=True)
+        raise
+
+
+migrate_legacy_data()
+
 SETTINGS_PATH = os.path.abspath(
     os.environ.get("RADIO_SETTINGS_PATH", os.path.join(DATA_DIR, "settings.json"))
 )

@@ -76,10 +76,14 @@ def initialize_database():
                 ON transcripts(timestamp);
             CREATE INDEX IF NOT EXISTS idx_transcripts_recorded_at
                 ON transcripts(recorded_at);
+            CREATE INDEX IF NOT EXISTS idx_transcripts_recorded_at_id
+                ON transcripts(recorded_at, id);
             CREATE INDEX IF NOT EXISTS idx_transcripts_status_id
                 ON transcripts(status, id);
             CREATE INDEX IF NOT EXISTS idx_transcripts_pending
                 ON transcripts(broadcast_pending, id);
+            CREATE INDEX IF NOT EXISTS idx_transcripts_bookmarked_status_id
+                ON transcripts(bookmarked, status, id);
 
             CREATE TABLE IF NOT EXISTS service_heartbeats (
                 service TEXT PRIMARY KEY,

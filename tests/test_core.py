@@ -4,6 +4,8 @@ import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta
+from types import SimpleNamespace
+from unittest import mock
 
 
 TEST_ROOT = tempfile.TemporaryDirectory()
@@ -86,6 +88,65 @@ class SyncPriorityTests(unittest.TestCase):
         self.assertEqual(candidates[0][0], 0)
         self.assertEqual(candidates[1][0], 1)
 
+    def test_backlog_uses_newest_supported_audio_first(self):
+        filenames = (
+            "2026-01-01-00-00-00-Archive.mp3",
+            "2026-02-01-00-00-00-Newer.wav",
+            "2026-03-01-00-00-00-Newest.m4a",
+        )
+        for filename in filenames:
+            with open(os.path.join(SOURCE_DIR, filename), "wb") as handle:
+                handle.write(b"audio")
+
+        candidates = sync.candidate_files()
+
+        self.assertEqual(
+            [candidate[2] for candidate in candidates],
+            list(reversed(filenames)),
+        )
+
+    def test_timestamped_archive_scan_does_not_stat_every_network_file(self):
+        filename = "2026-04-01-12-00-00-Archive.mp3"
+        with open(os.path.join(SOURCE_DIR, filename), "wb") as handle:
+            handle.write(b"audio")
+
+        with mock.patch.object(
+            sync.os,
+            "stat",
+            side_effect=AssertionError("timestamped files should be sorted by name"),
+        ):
+            candidates = sync.candidate_files()
+
+        self.assertEqual(candidates[0][2], filename)
+        self.assertIsNone(candidates[0][4])
+
+    def test_unwritable_destination_fails_before_network_scan(self):
+        heartbeat_calls = []
+        with (
+            mock.patch.object(sync.os.path, "isdir", return_value=True),
+            mock.patch.object(
+                sync,
+                "destination_write_error",
+                return_value="Operation not permitted",
+            ),
+            mock.patch.object(sync, "candidate_files") as candidate_files,
+            mock.patch.object(
+                sync,
+                "update_heartbeat",
+                side_effect=lambda *args, **kwargs: heartbeat_calls.append(
+                    (args, kwargs)
+                ),
+            ),
+        ):
+            sync.sync_once()
+
+        candidate_files.assert_not_called()
+        self.assertEqual(heartbeat_calls[-1][0][1], "error")
+        self.assertEqual(
+            heartbeat_calls[-1][0][2]["reason"],
+            "destination_not_writable",
+        )
+
     def test_verified_copy_records_source_identity(self):
         filename = "2026-01-01-00-00-00-Test.mp3"
         source_path = os.path.join(SOURCE_DIR, filename)
@@ -93,7 +154,12 @@ class SyncPriorityTests(unittest.TestCase):
         with open(source_path, "wb") as handle:
             handle.write(b"verified audio bytes")
         source_stat = os.stat(source_path)
-        sync.copy_verified(filename, source_path, source_stat, destination_path)
+        with mock.patch.object(
+            sync.shutil,
+            "copy2",
+            side_effect=AssertionError("network metadata must not be copied"),
+        ):
+            sync.copy_verified(filename, source_path, source_stat, destination_path)
         with open(destination_path, "rb") as handle:
             self.assertEqual(handle.read(), b"verified audio bytes")
         with connect(read_only=True) as connection:
@@ -103,6 +169,52 @@ class SyncPriorityTests(unittest.TestCase):
             ).fetchone()
         self.assertIsNotNone(row)
         self.assertTrue(row["sha256"])
+
+    def test_low_disk_heartbeat_remains_paused_after_scan(self):
+        filename = "2026-01-01-00-00-00-LowDisk.mp3"
+        source_path = os.path.join(SOURCE_DIR, filename)
+        with open(source_path, "wb") as handle:
+            handle.write(b"audio")
+        source_stat = os.stat(source_path)
+        heartbeat_calls = []
+
+        with (
+            mock.patch.object(
+                sync,
+                "candidate_files",
+                return_value=[
+                    (
+                        1,
+                        datetime(2026, 1, 1).timestamp(),
+                        filename,
+                        source_path,
+                        source_stat,
+                    )
+                ],
+            ),
+            mock.patch.object(sync, "load_sync_records", return_value={}),
+            mock.patch.object(sync, "source_is_stable", return_value=True),
+            mock.patch.object(
+                sync.shutil,
+                "disk_usage",
+                return_value=SimpleNamespace(free=0),
+            ),
+            mock.patch.object(
+                sync,
+                "update_heartbeat",
+                side_effect=lambda *args, **kwargs: heartbeat_calls.append(
+                    (args, kwargs)
+                ),
+            ),
+        ):
+            sync.sync_once()
+
+        self.assertTrue(heartbeat_calls)
+        self.assertEqual(heartbeat_calls[-1][0][1], "paused")
+        self.assertEqual(
+            heartbeat_calls[-1][0][2]["reason"],
+            "low_disk_space",
+        )
 
 
 if __name__ == "__main__":

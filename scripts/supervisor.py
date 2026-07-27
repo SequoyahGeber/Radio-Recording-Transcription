@@ -151,6 +151,7 @@ def main():
     environment = dict(os.environ)
     environment["RADIO_HOST"] = RADIO_HOST
     environment["RADIO_PORT"] = str(RADIO_PORT)
+    environment.setdefault("PYTHONUNBUFFERED", "1")
     environment.setdefault("RADIO_TRANSCRIPTION_ENGINE", "mlx")
     environment.setdefault("RADIO_MODEL_SIZE", "medium")
     environment.setdefault("HF_HOME", os.path.join(PROJECT_ROOT, "models", "hf-mlx"))
@@ -160,12 +161,13 @@ def main():
         f"https://{worker_host}:{RADIO_PORT}/api/new_transcript",
     )
 
-    uvicorn = os.path.join(os.path.dirname(sys.executable), "uvicorn")
     processes = [
         ManagedProcess(
             "server",
             [
-                uvicorn,
+                sys.executable,
+                "-m",
+                "uvicorn",
                 "backend.server:app",
                 "--host",
                 RADIO_HOST,

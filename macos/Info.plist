@@ -10,6 +10,8 @@
   <string>RadioCommandCenter</string>
   <key>CFBundleIdentifier</key>
   <string>local.radio.command-center</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon.icns</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
@@ -17,7 +19,7 @@
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>2.0.0</string>
+  <string>3.0.1</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>NSHighResolutionCapable</key>

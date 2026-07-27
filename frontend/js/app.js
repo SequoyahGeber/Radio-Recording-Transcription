@@ -1,4 +1,4 @@
-// --- Sidebar ---
+// --- Top control deck ---
 function readStoredJSON(key, fallback) {
   try {
     const value = JSON.parse(localStorage.getItem(key) || "null");
@@ -12,21 +12,32 @@ function readStoredJSON(key, fallback) {
 const sidebarToggleButton = document.getElementById("sidebar-collapse-btn");
 
 function setSidebarCollapsed(collapsed) {
-  document.body.classList.toggle("sidebar-collapsed", collapsed);
+  document.body.classList.toggle("controls-collapsed", collapsed);
   sidebarToggleButton.setAttribute("aria-expanded", String(!collapsed));
   sidebarToggleButton.setAttribute(
     "aria-label",
-    collapsed ? "Expand sidebar" : "Collapse sidebar",
+    collapsed ? "Show dashboard controls" : "Hide dashboard controls",
   );
-  sidebarToggleButton.title = collapsed ? "Expand sidebar" : "Collapse sidebar";
-  localStorage.setItem("radioSidebarCollapsed", collapsed ? "1" : "0");
+  sidebarToggleButton.title = collapsed
+    ? "Show dashboard controls"
+    : "Hide dashboard controls";
+  document.getElementById("controls-toggle-label").innerText = collapsed
+    ? "Show controls"
+    : "Hide controls";
+  localStorage.setItem("radioControlsCollapsed", collapsed ? "1" : "0");
 }
 
 window.toggleSidebar = function () {
-  setSidebarCollapsed(!document.body.classList.contains("sidebar-collapsed"));
+  setSidebarCollapsed(!document.body.classList.contains("controls-collapsed"));
 };
 
-setSidebarCollapsed(localStorage.getItem("radioSidebarCollapsed") === "1");
+const storedControlsState = localStorage.getItem("radioControlsCollapsed");
+const legacySidebarState = localStorage.getItem("radioSidebarCollapsed");
+setSidebarCollapsed(
+  storedControlsState === null
+    ? legacySidebarState === null || legacySidebarState === "1"
+    : storedControlsState === "1",
+);
 
 // --- Time Selector Generator ---
 function populateTimeFilters() {
@@ -80,6 +91,8 @@ function triggerDesktopNotification(channel, text) {
 // --- Core Configuration & State ---
 const dashboard = document.getElementById("dashboard");
 const togglesContainer = document.getElementById("channel-toggles");
+const globalSearchInput = document.getElementById("global-search");
+globalSearchInput.value = "";
 const knownChannels = new Set();
 const processedMessages = new Set();
 const autoScrollState = {};
@@ -90,14 +103,89 @@ let currentProfile = null;
 let archiveSearchTimer = null;
 let archiveRequestNumber = 0;
 let lastSeenTranscriptId = 0;
+let oldestLoadedTranscriptId = null;
+let oldestLoadedRecordedAt = Number.POSITIVE_INFINITY;
+let loadingOlderTranscripts = false;
+let hasMoreHistory = true;
 let showSuspectTranscripts = false;
 let bookmarksOnly = false;
+let renderBatchDepth = 0;
+let lastReportedServiceState = "";
+let clientFiltersApplied = false;
+const INITIAL_ARCHIVE_LIMIT = 100;
+const ARCHIVE_PAGE_SIZE = 100;
+const ARCHIVE_FETCH_LIMIT = ARCHIVE_PAGE_SIZE + 1;
+const ARCHIVE_RENDER_BATCH_SIZE = 20;
+const MAX_LIVE_RENDERED_TRANSMISSIONS = 300;
 const storedHiddenChannels = readStoredJSON("radioHiddenChannels", []);
 const hiddenChannels = new Set(
   Array.isArray(storedHiddenChannels) ? storedHiddenChannels : [],
 );
 const storedColumnOrder = readStoredJSON("radioColumnOrder", []);
 let savedColumnOrder = Array.isArray(storedColumnOrder) ? storedColumnOrder : [];
+
+// --- Integrated event console ---
+const consolePanel = document.getElementById("console-panel");
+const consoleToggleButton = document.getElementById("console-toggle-button");
+const consoleOutput = document.getElementById("console-output");
+const consoleStatus = document.getElementById("console-status");
+const consoleServiceFilter = document.getElementById("console-service");
+const consoleLevelFilter = document.getElementById("console-level");
+const consolePauseButton = document.getElementById("console-pause-button");
+const consoleErrorCount = document.getElementById("console-error-count");
+const consoleState = {
+  browserEntries: [],
+  serverEntries: [],
+  paused: false,
+  pollTimer: null,
+  requestNumber: 0,
+  unseenErrors: 0,
+  hiddenEntryIds: new Set(),
+};
+
+function normalizeConsoleLevel(level) {
+  const normalized = String(level || "info").toLowerCase();
+  if (["critical", "fatal", "error"].includes(normalized)) return "error";
+  if (["warning", "warn"].includes(normalized)) return "warning";
+  return "info";
+}
+
+function recordConsoleEvent(level, message, details = "") {
+  const entry = {
+    id: `browser-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    timestamp: new Date().toISOString(),
+    source: "browser",
+    level: normalizeConsoleLevel(level),
+    message: `${String(message)}${details ? ` · ${String(details)}` : ""}`,
+  };
+  consoleState.browserEntries.push(entry);
+  if (consoleState.browserEntries.length > 300) {
+    consoleState.browserEntries.splice(0, consoleState.browserEntries.length - 300);
+  }
+  if (entry.level === "error" && consolePanel.hidden) {
+    consoleState.unseenErrors += 1;
+    consoleErrorCount.innerText = String(consoleState.unseenErrors);
+    consoleErrorCount.hidden = false;
+  }
+  if (!consolePanel.hidden && !consoleState.paused) renderConsoleEntries();
+}
+
+window.addEventListener("error", (event) => {
+  recordConsoleEvent(
+    "error",
+    event.message || "Unhandled dashboard error",
+    event.filename ? `${event.filename}:${event.lineno || 0}` : "",
+  );
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  const reason = event.reason;
+  recordConsoleEvent(
+    "error",
+    "Unhandled dashboard promise",
+    reason?.message || String(reason || "Unknown rejection"),
+  );
+});
 
 // Dynamic Keyword Setup
 const DEFAULT_ALERT_KEYWORDS = [
@@ -260,6 +348,7 @@ renderKeywords();
 
 // --- Utility Functions ---
 function showToast(message, type = "default") {
+  if (type === "danger") recordConsoleEvent("error", message);
   const container = document.getElementById("toast-container");
   const toast = document.createElement("div");
   toast.className = `toast ${type !== "default" ? "toast-" + type : ""}`;
@@ -269,6 +358,142 @@ function showToast(message, type = "default") {
     toast.style.animation = "toastFadeOut 0.3s forwards";
     setTimeout(() => toast.remove(), 300);
   }, 3000);
+}
+
+function consoleEntryTimestamp(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function renderConsoleEntries() {
+  const service = consoleServiceFilter.value;
+  const level = consoleLevelFilter.value;
+  const entries = [...consoleState.serverEntries, ...consoleState.browserEntries]
+    .filter((entry) => !consoleState.hiddenEntryIds.has(entry.id))
+    .filter((entry) => service === "all" || entry.source === service)
+    .filter((entry) => level === "all" || entry.level === level)
+    .sort((left, right) =>
+      String(left.timestamp || "").localeCompare(String(right.timestamp || "")),
+    )
+    .slice(-500);
+
+  const wasNearBottom =
+    consoleOutput.scrollHeight -
+      consoleOutput.scrollTop -
+      consoleOutput.clientHeight <
+    50;
+  consoleOutput.replaceChildren();
+  if (entries.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "console-empty";
+    empty.innerText = "No events match this view.";
+    consoleOutput.appendChild(empty);
+  } else {
+    const fragment = document.createDocumentFragment();
+    entries.forEach((entry) => {
+      const row = document.createElement("div");
+      row.className = "console-entry";
+      row.dataset.level = normalizeConsoleLevel(entry.level);
+
+      const time = document.createElement("span");
+      time.className = "console-time";
+      time.innerText = consoleEntryTimestamp(entry.timestamp);
+
+      const source = document.createElement("span");
+      source.className = "console-source";
+      source.innerText = entry.source || "system";
+
+      const entryLevel = document.createElement("span");
+      entryLevel.className = "console-level";
+      entryLevel.innerText = normalizeConsoleLevel(entry.level);
+
+      const message = document.createElement("span");
+      message.className = "console-message";
+      message.innerText = entry.message || "";
+
+      row.append(time, source, entryLevel, message);
+      fragment.appendChild(row);
+    });
+    consoleOutput.appendChild(fragment);
+  }
+  consoleStatus.innerText = `${entries.length} visible event${entries.length === 1 ? "" : "s"} · updated ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
+  if (wasNearBottom || consoleOutput.scrollTop === 0) {
+    consoleOutput.scrollTop = consoleOutput.scrollHeight;
+  }
+}
+
+function scheduleConsolePoll(delay = 4000) {
+  clearTimeout(consoleState.pollTimer);
+  if (consolePanel.hidden || consoleState.paused) return;
+  consoleState.pollTimer = setTimeout(fetchConsoleEntries, delay);
+}
+
+async function fetchConsoleEntries() {
+  if (consolePanel.hidden || consoleState.paused) return;
+  const requestNumber = ++consoleState.requestNumber;
+  const selectedService = consoleServiceFilter.value;
+  if (selectedService === "browser") {
+    consoleState.serverEntries = [];
+    renderConsoleEntries();
+    scheduleConsolePoll();
+    return;
+  }
+  consoleStatus.innerText = "Refreshing service events…";
+  try {
+    const parameters = new URLSearchParams({
+      service: selectedService,
+      lines: "250",
+    });
+    const response = await fetch(`/api/console?${parameters}`, {
+      cache: "no-store",
+    });
+    if (response.status === 401) {
+      window.location.replace("/login");
+      return;
+    }
+    if (!response.ok) throw new Error("Service console unavailable");
+    const payload = await response.json();
+    if (requestNumber !== consoleState.requestNumber) return;
+    consoleState.serverEntries = Array.isArray(payload.entries)
+      ? payload.entries
+      : [];
+    renderConsoleEntries();
+  } catch (error) {
+    consoleStatus.innerText = "Could not refresh service events";
+    recordConsoleEvent("error", "Console refresh failed", error.message);
+  } finally {
+    scheduleConsolePoll();
+  }
+}
+
+function setConsoleOpen(open) {
+  consolePanel.hidden = !open;
+  consoleToggleButton.setAttribute("aria-expanded", String(open));
+  if (open) {
+    consoleState.unseenErrors = 0;
+    consoleErrorCount.hidden = true;
+    renderConsoleEntries();
+    fetchConsoleEntries();
+  } else {
+    clearTimeout(consoleState.pollTimer);
+  }
+}
+
+function clearConsoleView() {
+  [...consoleState.serverEntries, ...consoleState.browserEntries].forEach((entry) =>
+    consoleState.hiddenEntryIds.add(entry.id),
+  );
+  if (consoleState.hiddenEntryIds.size > 2000) {
+    consoleState.hiddenEntryIds.clear();
+    consoleState.serverEntries = [];
+    consoleState.browserEntries = [];
+  }
+  renderConsoleEntries();
 }
 
 function getChannelName(filename) {
@@ -378,7 +603,7 @@ function createColumn(channelName, announce = true) {
               <div class="col-actions">
                   <button class="arrow-btn" data-action="move-column" data-column-id="${colId}" data-direction="left" title="Move left" aria-label="Move ${safeChannelName} left">◀</button>
                   <button class="arrow-btn" data-action="move-column" data-column-id="${colId}" data-direction="right" title="Move right" aria-label="Move ${safeChannelName} right">▶</button>
-                  <button class="scroll-toggle active" data-action="toggle-auto-scroll" data-column-id="${colId}">Auto-Scroll</button>
+                  <button class="scroll-toggle active" data-action="toggle-auto-scroll" data-column-id="${colId}">Follow</button>
               </div>
           </div>
       </div>
@@ -414,21 +639,34 @@ function moveColumn(colId, direction) {
 
 function updatePlayState(audio, state) {
   const btn = audio.parentElement.querySelector(".play-btn");
-  if (!btn) return;
-  if (state === "playing") {
-    btn.innerHTML = "⏸";
-    btn.style.paddingLeft = "0";
-  } else if (state === "paused") {
-    btn.innerHTML = "▶";
-    btn.style.paddingLeft = "2px";
-  } else if (state === "waiting") {
-    btn.innerHTML = "⏳";
-    btn.style.paddingLeft = "0";
+  if (btn) {
+    if (state === "playing") {
+      btn.innerHTML = "⏸";
+      btn.style.paddingLeft = "0";
+    } else if (state === "paused") {
+      btn.innerHTML = "▶";
+      btn.style.paddingLeft = "2px";
+    } else if (state === "waiting") {
+      btn.innerHTML = "…";
+      btn.style.paddingLeft = "0";
+    }
+  }
+
+  const cardButton = audio.closest(".message-card")?.querySelector(".audio-link");
+  if (cardButton) {
+    const playing = state === "playing" || state === "waiting";
+    cardButton.classList.toggle("active", playing);
+    cardButton.querySelector("span").innerText =
+      state === "playing" ? "Pause" : state === "waiting" ? "Loading" : "Audio";
+    cardButton.setAttribute(
+      "aria-label",
+      playing ? "Pause audio recording" : "Play audio recording",
+    );
   }
 }
 
-function togglePlay(btn) {
-  const audio = btn.parentElement.querySelector("audio");
+function toggleAudio(audio) {
+  if (!audio) return;
   if (audio.paused) {
     document.querySelectorAll("audio").forEach((a) => {
       if (a !== audio && !a.paused) a.pause();
@@ -445,6 +683,14 @@ function togglePlay(btn) {
     updatePlayState(audio, "paused");
     audio.pause();
   }
+}
+
+function togglePlay(btn) {
+  toggleAudio(btn.parentElement.querySelector("audio"));
+}
+
+function toggleCardAudio(btn) {
+  toggleAudio(btn.closest(".message-card")?.querySelector("audio"));
 }
 
 function updateProgress(audio) {
@@ -468,9 +714,9 @@ function seekAudio(event, container) {
 }
 
 function resetPlayer(audio) {
-  updatePlayState(audio, "paused");
   audio.parentElement.querySelector(".progress-fill").style.width = "0%";
   audio.parentElement.querySelector(".time-display").innerText = "0:00";
+  updatePlayState(audio, "paused");
 }
 
 function formatTime(seconds) {
@@ -485,14 +731,29 @@ function formatTime(seconds) {
 function createMessageCard(data) {
   const card = document.createElement("div");
   card.className = "message-card";
+  card.dataset.filename = String(data.filename || "");
   if (data.status === "suspect") card.classList.add("is-suspect");
   if (data.reviewed) card.classList.add("is-reviewed");
   if (data.bookmarked) card.classList.add("is-bookmarked");
   if (data.id) {
     card.dataset.transcriptId = String(data.id);
-    lastSeenTranscriptId = Math.max(lastSeenTranscriptId, Number(data.id) || 0);
+    const transcriptId = Number(data.id) || 0;
+    lastSeenTranscriptId = Math.max(lastSeenTranscriptId, transcriptId);
   }
-  const realTime = extractTimeFromFilename(data.filename, data.timestamp);
+  const realTime = extractTimeFromFilename(
+    data.filename,
+    data.recorded_at || data.timestamp,
+  );
+  if (
+    data.id &&
+    Number.isFinite(realTime.getTime()) &&
+    (realTime.getTime() < oldestLoadedRecordedAt ||
+      (realTime.getTime() === oldestLoadedRecordedAt &&
+        Number(data.id) < Number(oldestLoadedTranscriptId)))
+  ) {
+    oldestLoadedRecordedAt = realTime.getTime();
+    oldestLoadedTranscriptId = Number(data.id);
+  }
   const hours = realTime.getHours().toString().padStart(2, "0");
   const mins = realTime.getMinutes().toString().padStart(2, "0");
   card.setAttribute("data-time", `${hours}:${mins}`);
@@ -514,7 +775,7 @@ function createMessageCard(data) {
   ].join("-");
   card.setAttribute("data-date", isoDate);
 
-  let cleanText = data.transcript_text.replace(
+  const cleanText = String(data.transcript_text || "").replace(
     /\[\d+\.\d+s -> \d+\.\d+s\]\s*/g,
     "",
   );
@@ -524,7 +785,6 @@ function createMessageCard(data) {
     `${getChannelName(data.filename)} ${cleanText} ${dateStr} ${isoDate} ${realTime.toLocaleDateString()}`.toLowerCase(),
   );
   const encodedCleanText = encodeURIComponent(cleanText);
-  const safeRawText = cleanText.toLowerCase().replace(/"/g, "&quot;");
   const safeAudioUrl =
     "/audio/" + data.filename.split("/").map(encodeURIComponent).join("/");
   const canAudio = currentProfile?.permissions?.audio;
@@ -561,9 +821,9 @@ function createMessageCard(data) {
   card.innerHTML = `
       <div class="msg-meta">
           <div class="msg-datetime"><span class="msg-date">${dateStr}</span><span class="msg-time">${timeStr}</span></div>
-          <div>${qualityBadge}${correctionBadge}${canAudio ? `<a href="${safeAudioUrl}" target="_blank" class="audio-link" title="Download Source File">💾 Source</a>` : ""}</div>
+          <div>${qualityBadge}${correctionBadge}${canAudio ? `<button type="button" class="audio-link" data-action="toggle-card-audio" title="Play audio recording" aria-label="Play audio recording"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 9v6h4l5 4V5L9 9H5Z"></path><path d="M17 9.5a3.5 3.5 0 0 1 0 5"></path></svg><span>Audio</span></button>` : ""}</div>
       </div>
-      <div class="transcript-content" data-clean="${encodedCleanText}" data-raw="${safeRawText}">
+      <div class="transcript-content" data-clean="${encodedCleanText}">
           ${highlightText(cleanText)}
       </div>
       ${data.notes ? `<div class="operator-note">${escapeHTML(data.notes)}</div>` : ""}
@@ -578,6 +838,24 @@ function insertCardChronologically(container, card) {
   if (!Number.isFinite(recordedAt)) {
     container.appendChild(card);
     return true;
+  }
+
+  const lastCard = container.lastElementChild;
+  if (
+    !lastCard ||
+    recordedAt >= Number(lastCard.getAttribute("data-recorded-at"))
+  ) {
+    container.appendChild(card);
+    return true;
+  }
+
+  const firstCard = container.firstElementChild;
+  if (
+    firstCard &&
+    recordedAt <= Number(firstCard.getAttribute("data-recorded-at"))
+  ) {
+    container.insertBefore(card, firstCard);
+    return false;
   }
 
   const existingCards = container.querySelectorAll(".message-card");
@@ -614,6 +892,10 @@ function toggleColumn(colId, isChecked) {
 function toggleAutoScroll(colId, btn) {
   autoScrollState[colId] = !autoScrollState[colId];
   btn.classList.toggle("active", autoScrollState[colId]);
+  if (autoScrollState[colId]) {
+    const container = document.getElementById(`msgs-${colId}`);
+    if (container) container.scrollTop = container.scrollHeight;
+  }
 }
 
 function timeToMinutes(time) {
@@ -648,55 +930,143 @@ function updateSearchResults() {
   let totalMessages = 0;
   let visibleMessages = 0;
   let visibleFeeds = 0;
-  const filtering = Boolean(globalSearchQuery) || dateTimeFilterActive;
+  const filtering =
+    Boolean(globalSearchQuery) || dateTimeFilterActive || bookmarksOnly;
+  const columns = [...document.querySelectorAll(".channel-column")];
 
-  document.querySelectorAll(".channel-column").forEach((column) => {
-    const cards = [...column.querySelectorAll(".message-card")];
-    let columnMatches = 0;
-    const userHidden = column.classList.contains("channel-user-hidden");
-
-    cards.forEach((card) => {
-      card.classList.toggle(
-        "hidden-time",
-        !matchesActiveDateTimeFilter(card),
-      );
-      const matches =
-        !globalSearchQuery ||
-        card.getAttribute("data-search").includes(globalSearchQuery);
-      card.classList.toggle("hidden-search", !matches);
-      if (!userHidden) totalMessages += 1;
-      if (!userHidden && matches && !card.classList.contains("hidden-time")) {
-        columnMatches += 1;
-        visibleMessages += 1;
+  if (!filtering) {
+    if (clientFiltersApplied) {
+      document
+        .querySelectorAll(".message-card.hidden-search, .message-card.hidden-time")
+        .forEach((card) => card.classList.remove("hidden-search", "hidden-time"));
+      clientFiltersApplied = false;
+    }
+    columns.forEach((column) => {
+      const cardCount = column.querySelectorAll(".message-card").length;
+      const userHidden = column.classList.contains("channel-user-hidden");
+      column.classList.remove("hidden-search-column");
+      if (!userHidden) {
+        totalMessages += cardCount;
+        visibleMessages += cardCount;
+        visibleFeeds += 1;
       }
+      const count = column.querySelector(".channel-count");
+      if (count) count.innerText = String(cardCount);
     });
+  } else {
+    clientFiltersApplied = true;
+    columns.forEach((column) => {
+      const cards = [...column.querySelectorAll(".message-card")];
+      let columnMatches = 0;
+      const userHidden = column.classList.contains("channel-user-hidden");
 
-    column.classList.toggle(
-      "hidden-search-column",
-      filtering && columnMatches === 0,
-    );
-    if (!userHidden && (columnMatches > 0 || !filtering)) visibleFeeds += 1;
+      cards.forEach((card) => {
+        card.classList.toggle(
+          "hidden-time",
+          !matchesActiveDateTimeFilter(card),
+        );
+        const matches =
+          !globalSearchQuery ||
+          card.getAttribute("data-search").includes(globalSearchQuery);
+        card.classList.toggle("hidden-search", !matches);
+        if (!userHidden) totalMessages += 1;
+        if (!userHidden && matches && !card.classList.contains("hidden-time")) {
+          columnMatches += 1;
+          visibleMessages += 1;
+        }
+      });
 
-    const count = column.querySelector(".channel-count");
-    if (count) count.innerText = filtering ? `${columnMatches}/${cards.length}` : cards.length;
-  });
+      column.classList.toggle(
+        "hidden-search-column",
+        columnMatches === 0,
+      );
+      if (!userHidden && columnMatches > 0) visibleFeeds += 1;
+
+      const count = column.querySelector(".channel-count");
+      if (count) count.innerText = `${columnMatches}/${cards.length}`;
+    });
+  }
 
   const status = document.getElementById("search-status");
   status.innerText = filtering
     ? `${visibleMessages} result${visibleMessages === 1 ? "" : "s"} across ${visibleFeeds} feed${visibleFeeds === 1 ? "" : "s"}`
-    : `${totalMessages} transmissions across ${visibleFeeds} feeds`;
+    : `${totalMessages} loaded transmission${totalMessages === 1 ? "" : "s"} across ${visibleFeeds} feed${visibleFeeds === 1 ? "" : "s"}${hasMoreHistory ? " · scroll up for older" : " · complete history loaded"}`;
 
   document.getElementById("clear-global-search").hidden = !globalSearchQuery;
-  document.getElementById("empty-state").hidden = visibleMessages > 0 || !filtering;
+  const emptyState = document.getElementById("empty-state");
+  emptyState.hidden = visibleMessages > 0;
+  emptyState.querySelector("strong").innerText = filtering
+    ? "No matching transmissions"
+    : "No transmissions yet";
+  emptyState.querySelector("span").innerText = filtering
+    ? "Try a broader search or clear the date and time filter."
+    : "New radio traffic will appear here automatically.";
+}
+
+function requestSearchRefresh() {
+  if (renderBatchDepth > 0) return;
+  updateSearchResults();
 }
 
 function clearRenderedTranscripts() {
-  dashboard.innerHTML = "";
-  togglesContainer.innerHTML = "";
+  dashboard.querySelectorAll("audio").forEach((audio) => {
+    audio.pause();
+    audio.removeAttribute("src");
+  });
+  dashboard.replaceChildren();
+  togglesContainer.replaceChildren();
+  oldestLoadedTranscriptId = null;
+  oldestLoadedRecordedAt = Number.POSITIVE_INFINITY;
   knownChannels.clear();
   processedMessages.clear();
   Object.keys(unreadCounts).forEach((key) => delete unreadCounts[key]);
   Object.keys(autoScrollState).forEach((key) => delete autoScrollState[key]);
+}
+
+function nextAnimationFrame() {
+  return new Promise((resolve) => requestAnimationFrame(resolve));
+}
+
+function pruneOldestRenderedTranscripts() {
+  const cards = [...dashboard.querySelectorAll(".message-card")];
+  const excess = cards.length - MAX_LIVE_RENDERED_TRANSMISSIONS;
+  if (excess <= 0) return;
+
+  cards
+    .sort(
+      (left, right) =>
+        Number(left.dataset.recordedAt || 0) -
+          Number(right.dataset.recordedAt || 0) ||
+        Number(left.dataset.transcriptId || 0) -
+          Number(right.dataset.transcriptId || 0),
+    )
+    .slice(0, excess)
+    .forEach((card) => {
+      processedMessages.delete(card.dataset.filename);
+      const audio = card.querySelector("audio");
+      if (audio) {
+        audio.pause();
+        audio.removeAttribute("src");
+      }
+      card.remove();
+    });
+
+  const oldestRemainingCard = [
+    ...dashboard.querySelectorAll("[data-transcript-id]"),
+  ].sort(
+    (left, right) =>
+      Number(left.dataset.recordedAt || 0) -
+        Number(right.dataset.recordedAt || 0) ||
+      Number(left.dataset.transcriptId || 0) -
+        Number(right.dataset.transcriptId || 0),
+  )[0];
+  oldestLoadedTranscriptId = oldestRemainingCard
+    ? Number(oldestRemainingCard.dataset.transcriptId)
+    : null;
+  oldestLoadedRecordedAt = oldestRemainingCard
+    ? Number(oldestRemainingCard.dataset.recordedAt)
+    : Number.POSITIVE_INFINITY;
+  hasMoreHistory = true;
 }
 
 function archiveQueryParameters(options = {}) {
@@ -713,14 +1083,23 @@ function archiveQueryParameters(options = {}) {
   if (showSuspectTranscripts) parameters.set("include_suspect", "true");
   if (bookmarksOnly) parameters.set("bookmarked", "true");
   if (options.afterId) parameters.set("after_id", String(options.afterId));
-  parameters.set("limit", options.afterId ? "2000" : "1000");
+  if (options.beforeId) parameters.set("before_id", String(options.beforeId));
+  parameters.set(
+    "limit",
+    options.afterId
+      ? "2000"
+      : String(ARCHIVE_FETCH_LIMIT),
+  );
   return parameters;
 }
 
 async function loadArchive(options = {}) {
-  const requestNumber = ++archiveRequestNumber;
+  const incremental = Boolean(options.afterId || options.beforeId);
+  const requestNumber = incremental
+    ? archiveRequestNumber
+    : ++archiveRequestNumber;
   const status = document.getElementById("search-status");
-  if (!options.afterId) status.innerText = "Searching the complete archive…";
+  if (!incremental) status.innerText = "Loading recent transmissions…";
   const response = await fetch(`/api/history?${archiveQueryParameters(options)}`, {
     cache: "no-store",
   });
@@ -729,14 +1108,103 @@ async function loadArchive(options = {}) {
     return;
   }
   if (!response.ok) throw new Error("Archive search unavailable");
-  const rows = await response.json();
-  if (requestNumber !== archiveRequestNumber && !options.afterId) return;
-  if (!options.afterId) clearRenderedTranscripts();
-  rows.forEach((item) =>
-    processIncomingData(item, { announce: false, notify: false }),
-  );
+  const receivedRows = await response.json();
+  if (requestNumber !== archiveRequestNumber) return 0;
+  const hasOlderPage =
+    !options.afterId && receivedRows.length > ARCHIVE_PAGE_SIZE;
+  const rows = hasOlderPage
+    ? receivedRows.slice(receivedRows.length - INITIAL_ARCHIVE_LIMIT)
+    : receivedRows;
+  if (!incremental) {
+    clearRenderedTranscripts();
+    hasMoreHistory = true;
+  }
+  const rowsToRender = options.beforeId ? [...rows].reverse() : rows;
+  renderBatchDepth += 1;
+  try {
+    for (let index = 0; index < rowsToRender.length; index += ARCHIVE_RENDER_BATCH_SIZE) {
+      rowsToRender
+        .slice(index, index + ARCHIVE_RENDER_BATCH_SIZE)
+        .forEach((item) =>
+          processIncomingData(item, {
+            announce: false,
+            notify: false,
+            deferScroll: true,
+            animate: false,
+          }),
+        );
+      if (index + ARCHIVE_RENDER_BATCH_SIZE < rowsToRender.length) {
+        await nextAnimationFrame();
+      }
+    }
+  } finally {
+    renderBatchDepth -= 1;
+  }
+  if (options.beforeId || !incremental) {
+    hasMoreHistory = hasOlderPage;
+  }
   updateSearchResults();
-  requestAnimationFrame(scrollAllAutoColumnsToLatest);
+  if (options.beforeId && options.scrollPositions) {
+    requestAnimationFrame(() => {
+      options.scrollPositions.forEach((position, containerId) => {
+        const container = document.getElementById(containerId);
+        if (!container) return;
+        container.scrollTop =
+          position.scrollTop + (container.scrollHeight - position.scrollHeight);
+      });
+      document.querySelectorAll(".messages-container").forEach((container) => {
+        if (!options.scrollPositions.has(container.id)) {
+          container.scrollTop = container.scrollHeight;
+        }
+      });
+    });
+  } else {
+    requestAnimationFrame(scrollAllAutoColumnsToLatest);
+  }
+  recordConsoleEvent(
+    "info",
+    options.afterId
+      ? "Archive catch-up complete"
+      : options.beforeId
+        ? "Older archive page loaded"
+        : "Recent archive loaded",
+    `${rows.length} transmission${rows.length === 1 ? "" : "s"}`,
+  );
+  return rows.length;
+}
+
+async function loadOlderArchive() {
+  if (
+    loadingOlderTranscripts ||
+    !hasMoreHistory ||
+    oldestLoadedTranscriptId === null
+  ) {
+    return;
+  }
+  loadingOlderTranscripts = true;
+  const scrollPositions = new Map(
+    [...document.querySelectorAll(".messages-container")].map((container) => [
+      container.id,
+      {
+        scrollHeight: container.scrollHeight,
+        scrollTop: container.scrollTop,
+      },
+    ]),
+  );
+  document.getElementById("search-status").innerText =
+    "Loading older transmissions…";
+  try {
+    await loadArchive({
+      beforeId: oldestLoadedTranscriptId,
+      scrollPositions,
+    });
+  } catch (error) {
+    showToast("Older transmissions could not be loaded.", "danger");
+    recordConsoleEvent("error", "Older archive load failed", error.message);
+  } finally {
+    loadingOlderTranscripts = false;
+    updateSearchResults();
+  }
 }
 
 function scheduleArchiveSearch() {
@@ -797,6 +1265,7 @@ window.clearDateTimeFilter = function () {
   document
     .querySelectorAll(".message-card")
     .forEach((card) => card.classList.remove("hidden-time"));
+  updateSearchResults();
   scheduleArchiveSearch();
   showToast("Date and time filter cleared");
 };
@@ -814,7 +1283,7 @@ window.exportCSV = function () {
 };
 
 function processIncomingData(data, options = {}) {
-  if (!hasMeaningfulTranscript(data.transcript_text)) return;
+  if (!data || !hasMeaningfulTranscript(data.transcript_text)) return;
   if (processedMessages.has(data.filename)) return;
   processedMessages.add(data.filename);
 
@@ -828,10 +1297,18 @@ function processIncomingData(data, options = {}) {
   const colId = getColumnId(channelName);
   const container = document.getElementById(`msgs-${colId}`);
   const card = createMessageCard(data);
+  if (options.animate === false) {
+    card.classList.add("no-entry-animation");
+  }
   const insertedAtEnd = insertCardChronologically(container, card);
 
   if (options.notify !== false && hasAlertKeyword(data.transcript_text)) {
     triggerDesktopNotification(channelName, data.transcript_text);
+    recordConsoleEvent(
+      "info",
+      `New transmission on ${channelName}`,
+      hasAlertKeyword(data.transcript_text) ? "emergency keyword detected" : "",
+    );
   }
 
   const colElement = document.getElementById(colId);
@@ -844,10 +1321,13 @@ function processIncomingData(data, options = {}) {
     setTimeout(() => (badge.style.transform = "scale(1)"), 150);
   }
 
-  if (autoScrollState[colId] && insertedAtEnd) {
+  if (!options.deferScroll && autoScrollState[colId] && insertedAtEnd) {
     container.scrollTop = container.scrollHeight;
   }
-  updateSearchResults();
+  if (options.prune !== false && options.announce !== false) {
+    pruneOldestRenderedTranscripts();
+  }
+  requestSearchRefresh();
 }
 
 function scrollAllAutoColumnsToLatest() {
@@ -868,6 +1348,24 @@ function formatEta(minutes) {
   if (minutes < 60) return `${Math.max(1, Math.round(minutes))}m`;
   const hours = minutes / 60;
   return hours < 24 ? `${hours.toFixed(1)}h` : `${(hours / 24).toFixed(1)}d`;
+}
+
+function describeServiceIssue(stats, unavailable) {
+  const sync = stats.services?.sync;
+  const details = sync?.details || {};
+  if (!stats.source_mounted || details.source_mounted === false) {
+    return "Recording drive is not mounted";
+  }
+  if (details.reason === "destination_not_writable") {
+    return "Sync storage is not writable";
+  }
+  if (details.reason === "low_disk_space") {
+    return "Sync paused: local disk space is low";
+  }
+  if (details.reason === "copy_failed" || Number(details.failed) > 0) {
+    return `Sync copy failed${details.failed ? ` (${details.failed})` : ""}`;
+  }
+  return `Attention: ${unavailable.join(", ") || "worker status unavailable"}`;
 }
 
 async function refreshSystemStats() {
@@ -891,14 +1389,34 @@ async function refreshSystemStats() {
     const unavailable = Object.entries(stats.services || {})
       .filter(([, service]) => service.stale || !["online", "idle"].includes(service.status))
       .map(([name]) => name);
+    const serviceIssue = describeServiceIssue(stats, unavailable);
     serviceStatus.innerText =
       stats.status === "online"
         ? `Workers healthy · ${formatMetric(stats.pending_delivery)} pending delivery`
-        : `Attention: ${unavailable.join(", ") || "worker status unavailable"}`;
+        : serviceIssue;
+    serviceStatus.title =
+      stats.status === "online"
+        ? ""
+        : stats.services?.sync?.details?.error || serviceIssue;
     serviceStatus.classList.toggle("service-status-warning", stats.status !== "online");
-  } catch {
+    const serviceState = `${stats.status}:${unavailable.join(",")}`;
+    if (serviceState !== lastReportedServiceState) {
+      recordConsoleEvent(
+        stats.status === "online" ? "info" : "warning",
+        stats.status === "online"
+          ? "Worker services healthy"
+          : "Worker service attention required",
+        stats.status === "online" ? "" : serviceStatus.title,
+      );
+      lastReportedServiceState = serviceState;
+    }
+  } catch (error) {
     document.getElementById("engine-status").innerText = "System metrics temporarily unavailable";
     document.getElementById("service-status").innerText = "Worker status unavailable";
+    if (lastReportedServiceState !== "unavailable") {
+      recordConsoleEvent("warning", "System metrics unavailable", error.message);
+      lastReportedServiceState = "unavailable";
+    }
   }
 }
 
@@ -1017,6 +1535,9 @@ async function loadCurrentProfile() {
   }
   if (!response.ok) throw new Error("Profile unavailable");
   currentProfile = await response.json();
+  window.webkit?.messageHandlers?.profileAccess?.postMessage({
+    role: currentProfile.role,
+  });
   document.getElementById("current-profile").innerText =
     `${currentProfile.display_name} · ${currentProfile.role}`;
   document.getElementById("export-csv").hidden =
@@ -1025,6 +1546,7 @@ async function loadCurrentProfile() {
     !currentProfile.permissions.suspect;
   document.getElementById("profile-admin-section").hidden =
     !currentProfile.permissions.profiles;
+  consoleToggleButton.hidden = !currentProfile.permissions.console;
   if (currentProfile.permissions.profiles) await loadProfiles();
 }
 
@@ -1033,7 +1555,16 @@ compactModeToggle.checked = localStorage.getItem("radioCompactMode") === "1";
 document.body.classList.toggle("compact-mode", compactModeToggle.checked);
 
 sidebarToggleButton.addEventListener("click", toggleSidebar);
-document.getElementById("global-search").addEventListener("input", (event) =>
+globalSearchInput.addEventListener("pointerdown", () => {
+  globalSearchInput.readOnly = false;
+});
+globalSearchInput.addEventListener("focus", () => {
+  globalSearchInput.readOnly = false;
+  if (!globalSearchQuery && globalSearchInput.value) {
+    globalSearchInput.value = "";
+  }
+});
+globalSearchInput.addEventListener("input", (event) =>
   filterAllFeeds(event.target.value),
 );
 document.getElementById("clear-global-search").addEventListener("click", clearGlobalSearch);
@@ -1041,9 +1572,21 @@ document.getElementById("new-keyword").addEventListener("keypress", addKeyword);
 document.getElementById("apply-date-filter").addEventListener("click", applyDateTimeFilter);
 document.getElementById("clear-date-filter").addEventListener("click", clearDateTimeFilter);
 document.getElementById("export-csv").addEventListener("click", exportCSV);
-document.getElementById("suspect-toggle").addEventListener("change", (event) => {
-  showSuspectTranscripts = event.target.checked;
-  scheduleArchiveSearch();
+document.getElementById("suspect-toggle").addEventListener("change", async (event) => {
+  const toggle = event.target;
+  const previousValue = showSuspectTranscripts;
+  showSuspectTranscripts = toggle.checked;
+  toggle.disabled = true;
+  try {
+    await loadArchive();
+  } catch (error) {
+    showSuspectTranscripts = previousValue;
+    toggle.checked = previousValue;
+    showToast("Suspect transcript filter could not be updated.", "danger");
+    recordConsoleEvent("error", "Suspect filter refresh failed", error.message);
+  } finally {
+    toggle.disabled = false;
+  }
 });
 document.getElementById("bookmarks-only-toggle").addEventListener("change", (event) => {
   bookmarksOnly = event.target.checked;
@@ -1059,6 +1602,36 @@ compactModeToggle.addEventListener("change", (event) => {
 notificationToggle.addEventListener("change", (event) =>
   updateNotificationPreference(event.target.checked),
 );
+consoleToggleButton.addEventListener("click", () =>
+  setConsoleOpen(consolePanel.hidden),
+);
+document
+  .getElementById("console-close-button")
+  .addEventListener("click", () => setConsoleOpen(false));
+document
+  .getElementById("console-refresh-button")
+  .addEventListener("click", () => {
+    consoleState.paused = false;
+    consolePauseButton.innerText = "Pause";
+    fetchConsoleEntries();
+  });
+document
+  .getElementById("console-clear-button")
+  .addEventListener("click", clearConsoleView);
+consolePauseButton.addEventListener("click", () => {
+  consoleState.paused = !consoleState.paused;
+  consolePauseButton.innerText = consoleState.paused ? "Resume" : "Pause";
+  consoleStatus.innerText = consoleState.paused
+    ? "Console updates paused"
+    : "Console updates resumed";
+  if (!consoleState.paused) fetchConsoleEntries();
+});
+consoleServiceFilter.addEventListener("change", () => {
+  consoleState.serverEntries = [];
+  renderConsoleEntries();
+  fetchConsoleEntries();
+});
+consoleLevelFilter.addEventListener("change", renderConsoleEntries);
 
 document.getElementById("logout-button").addEventListener("click", async () => {
   await fetch("/api/logout", { method: "POST" });
@@ -1071,6 +1644,41 @@ document.addEventListener("change", (event) => {
   }
 });
 
+function handleFeedScroll(container) {
+  const columnId = container.id.replace(/^msgs-/, "");
+  const distanceFromBottom =
+    container.scrollHeight - container.scrollTop - container.clientHeight;
+  if (distanceFromBottom > 80 && autoScrollState[columnId]) {
+    autoScrollState[columnId] = false;
+    const button = document.querySelector(
+      `[data-action="toggle-auto-scroll"][data-column-id="${CSS.escape(columnId)}"]`,
+    );
+    button?.classList.remove("active");
+  }
+  if (container.scrollTop <= 80) loadOlderArchive();
+}
+
+document.addEventListener(
+  "scroll",
+  (event) => {
+    if (event.target instanceof Element && event.target.matches(".messages-container")) {
+      handleFeedScroll(event.target);
+    }
+  },
+  true,
+);
+
+document.addEventListener(
+  "wheel",
+  (event) => {
+    const container = event.target.closest?.(".messages-container");
+    if (container && event.deltaY < 0 && container.scrollTop <= 80) {
+      loadOlderArchive();
+    }
+  },
+  { passive: true },
+);
+
 document.addEventListener("click", (event) => {
   const control = event.target.closest("[data-action]");
   if (!control) return;
@@ -1081,6 +1689,8 @@ document.addEventListener("click", (event) => {
     toggleAutoScroll(control.dataset.columnId, control);
   } else if (action === "toggle-play") {
     togglePlay(control);
+  } else if (action === "toggle-card-audio") {
+    toggleCardAudio(control);
   } else if (action === "seek-audio") {
     seekAudio(event, control);
   } else if (
@@ -1118,6 +1728,7 @@ document.addEventListener("keydown", (event) => {
 
   if (event.key === "/" && !isTyping) {
     event.preventDefault();
+    searchInput.readOnly = false;
     searchInput.focus();
   } else if (event.key === "Escape" && document.activeElement === searchInput) {
     clearGlobalSearch();
@@ -1128,6 +1739,7 @@ document.addEventListener("keydown", (event) => {
 let ws;
 let reconnectTimer;
 let reconnectAttempt = 0;
+let currentConnectionState = "";
 
 function setConnectionState(state) {
   const label = document.getElementById("connection-label");
@@ -1139,6 +1751,17 @@ function setConnectionState(state) {
         ? "Reconnecting…"
         : "Connecting securely…";
   dot.classList.toggle("status-dot-offline", state === "offline");
+  if (state !== currentConnectionState) {
+    recordConsoleEvent(
+      state === "offline" ? "warning" : "info",
+      state === "online"
+        ? "Live connection established"
+        : state === "offline"
+          ? "Live connection interrupted; retrying"
+          : "Connecting to live radio feed",
+    );
+    currentConnectionState = state;
+  }
 }
 
 function connectWebSocket() {
@@ -1148,7 +1771,13 @@ function connectWebSocket() {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
 
-  ws.onmessage = (event) => processIncomingData(JSON.parse(event.data));
+  ws.onmessage = (event) => {
+    try {
+      processIncomingData(JSON.parse(event.data));
+    } catch (error) {
+      recordConsoleEvent("error", "Invalid live feed event", error.message);
+    }
+  };
   ws.onopen = () => {
     const wasReconnecting = reconnectAttempt > 0;
     reconnectAttempt = 0;

@@ -39,12 +39,13 @@ def process_is_running(pid):
 def status():
     pid = read_pid()
     running = process_is_running(pid)
+    dashboard_host = "127.0.0.1" if RADIO_HOST in {"0.0.0.0", "::"} else RADIO_HOST
     return {
         "running": running,
         "pid": pid if running else None,
         "host": RADIO_HOST,
         "port": RADIO_PORT,
-        "dashboard": f"https://{RADIO_HOST}:{RADIO_PORT}",
+        "dashboard": f"https://{dashboard_host}:{RADIO_PORT}",
     }
 
 

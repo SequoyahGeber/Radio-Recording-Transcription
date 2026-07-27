@@ -5,187 +5,243 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Radio Command Center | Live Ops</title>
 
-    <link rel="stylesheet" href="/static/css/style.css?v=20260726-1" />
+    <link rel="stylesheet" href="/static/css/style.css?v=20260727-5" />
   </head>
   <body>
-    <nav id="sidebar">
-      <button
-        id="sidebar-collapse-btn"
-        class="sidebar-collapse-btn"
-        type="button"
-        aria-controls="sidebar"
-        aria-expanded="true"
-        aria-label="Collapse sidebar"
-        title="Collapse sidebar"
-      >
-        <span aria-hidden="true">&#x276E;</span>
-      </button>
+    <header id="topbar">
+      <div class="topbar-main">
+        <div class="brand-header">
+          <div class="live-pulse"></div>
+          <div class="brand-copy">
+            <span>Ops Command</span>
+            <small>Live radio operations</small>
+          </div>
+        </div>
 
-      <div class="brand-header">
-        <div class="live-pulse"></div>
-        <div class="brand-copy">
-          <span>Ops Command</span>
-          <small>Live radio operations</small>
-        </div>
-      </div>
+        <section class="ops-overview" aria-label="System status">
+          <div class="ops-status-row">
+            <span><span id="connection-dot" class="status-dot"></span><span id="connection-label">Connecting securely…</span></span>
+            <span id="active-operators">— operators</span>
+          </div>
+          <div class="ops-metrics">
+            <div><strong id="metric-backlog">—</strong><span>Backlog</span></div>
+            <div><strong id="metric-rate">—</strong><span>Per min</span></div>
+            <div><strong id="metric-eta">—</strong><span>ETA</span></div>
+          </div>
+          <div class="ops-detail">
+            <span id="engine-status">Medium model · checking engine…</span>
+            <span id="service-status" class="service-status">Checking worker services…</span>
+          </div>
+        </section>
 
-      <section class="ops-overview" aria-label="System status">
-        <div class="ops-status-row">
-          <span><span id="connection-dot" class="status-dot"></span><span id="connection-label">Connecting securely…</span></span>
-          <span id="active-operators">— operators</span>
+        <div class="search-section">
+          <div class="global-search-wrap">
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="m21 21-4.35-4.35m2.35-5.65a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z"></path>
+            </svg>
+            <input
+              type="search"
+              id="global-search"
+              name="radio-archive-query"
+              autocomplete="off"
+              spellcheck="false"
+              readonly
+              placeholder="Search the complete archive..."
+              aria-label="Search all feeds"
+            />
+            <kbd>/</kbd>
+            <button
+              id="clear-global-search"
+              type="button"
+              aria-label="Clear search"
+              title="Clear search"
+              hidden
+            >
+              &times;
+            </button>
+          </div>
+          <div id="search-status" class="search-status" aria-live="polite">
+            Loading transmissions...
+          </div>
         </div>
-        <div class="ops-metrics">
-          <div><strong id="metric-backlog">—</strong><span>Backlog</span></div>
-          <div><strong id="metric-rate">—</strong><span>Per min</span></div>
-          <div><strong id="metric-eta">—</strong><span>ETA</span></div>
-        </div>
-        <div id="engine-status" class="engine-status">Medium model · checking engine…</div>
-        <div id="service-status" class="service-status">Checking worker services…</div>
-      </section>
 
-      <div class="sidebar-section search-section">
-        <div class="section-title section-title-row">
-          <span>Search</span>
-          <kbd>/</kbd>
-        </div>
-        <div class="global-search-wrap">
-          <svg aria-hidden="true" viewBox="0 0 24 24">
-            <path d="m21 21-4.35-4.35m2.35-5.65a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z"></path>
-          </svg>
-          <input
-            type="search"
-            id="global-search"
-            placeholder="Search the complete archive..."
-            aria-label="Search all feeds"
-          />
+        <div class="topbar-actions">
           <button
-            id="clear-global-search"
+            id="sidebar-collapse-btn"
+            class="topbar-control-btn"
             type="button"
-            aria-label="Clear search"
-            title="Clear search"
+            aria-controls="control-deck"
+            aria-expanded="true"
+          >
+            <span class="button-icon" aria-hidden="true">☷</span>
+            <span id="controls-toggle-label">Hide controls</span>
+          </button>
+          <button
+            id="console-toggle-button"
+            class="topbar-control-btn"
+            type="button"
+            aria-controls="console-panel"
+            aria-expanded="false"
             hidden
           >
-            &times;
+            <span class="button-icon console-icon" aria-hidden="true">&gt;_</span>
+            Console
+            <span id="console-error-count" class="console-error-count" hidden>0</span>
           </button>
-        </div>
-        <div id="search-status" class="search-status" aria-live="polite">
-          Loading transmissions...
-        </div>
-      </div>
-
-      <div class="sidebar-section">
-        <div class="section-title">Display Settings</div>
-        <label class="checkbox-label">
-          <div class="checkbox-inner">
-            <input type="checkbox" id="compact-mode-toggle" />
-            Compact Data View
+          <button id="export-csv" class="btn btn-primary">Export CSV</button>
+          <div class="account-menu">
+            <div id="current-profile" class="current-profile">Loading profile…</div>
+            <button id="logout-button" class="btn btn-quiet">Sign out</button>
           </div>
-        </label>
-        <label class="checkbox-label">
-          <div class="checkbox-inner">
-            <input type="checkbox" id="notification-toggle" />
-            Emergency Notifications
-          </div>
-        </label>
-        <label id="suspect-toggle-row" class="checkbox-label" hidden>
-          <div class="checkbox-inner">
-            <input type="checkbox" id="suspect-toggle" />
-            Show Suspect Transcripts
-          </div>
-        </label>
-        <label class="checkbox-label">
-          <div class="checkbox-inner">
-            <input type="checkbox" id="bookmarks-only-toggle" />
-            Bookmarks Only
-          </div>
-        </label>
-      </div>
-
-      <div class="sidebar-section">
-        <div class="section-title section-title-row">
-          <span>Emergency Highlights</span>
-          <span id="keyword-count" class="section-count"></span>
-        </div>
-        <input
-          type="text"
-          id="new-keyword"
-          placeholder="Add keyword + Enter"
-          class="search-input keyword-input"
-        />
-        <div id="keyword-list" class="keyword-list"></div>
-      </div>
-
-      <div class="sidebar-section">
-        <div class="section-title">Date &amp; Time</div>
-        <input
-          type="date"
-          id="filter-date"
-          class="search-input"
-          aria-label="Recording Date"
-        />
-        <select
-          id="filter-start"
-          class="search-input"
-          aria-label="Start Time"
-        ></select>
-        <select
-          id="filter-end"
-          class="search-input"
-          aria-label="End Time"
-        ></select>
-        <div class="filter-actions">
-          <button id="apply-date-filter" class="btn">
-            Apply
-          </button>
-          <button
-            id="clear-date-filter"
-            class="btn btn-quiet"
-          >
-            Clear
-          </button>
         </div>
       </div>
 
-      <div class="sidebar-section feeds-section">
-        <div class="section-title">Active Feeds</div>
-        <div class="toggle-group" id="channel-toggles"></div>
-      </div>
-
-      <div id="profile-admin-section" class="sidebar-section" hidden>
-        <div class="section-title">Access Profiles</div>
-        <div id="profile-list" class="profile-list"></div>
-        <input id="profile-username" class="search-input" placeholder="Username" />
-        <input id="profile-display-name" class="search-input" placeholder="Display name" />
-        <input id="profile-password" class="search-input" type="password" placeholder="New password" />
-        <select id="profile-role" class="search-input">
-          <option value="viewer">Viewer · transcript only</option>
-          <option value="operator">Operator · audio and review</option>
-          <option value="supervisor">Supervisor · correct and export</option>
-          <option value="admin">Admin · manage profiles</option>
-        </select>
-        <label class="checkbox-label">
-          <div class="checkbox-inner">
-            <input id="profile-active" type="checkbox" checked />
-            Profile Active
+      <div id="control-deck" class="control-deck">
+        <section class="control-card">
+          <div class="section-title">Display Settings</div>
+          <div class="control-options">
+            <label class="checkbox-label">
+              <div class="checkbox-inner">
+                <input type="checkbox" id="compact-mode-toggle" />
+                Compact Data View
+              </div>
+            </label>
+            <label class="checkbox-label">
+              <div class="checkbox-inner">
+                <input type="checkbox" id="notification-toggle" />
+                Emergency Notifications
+              </div>
+            </label>
+            <label id="suspect-toggle-row" class="checkbox-label" hidden>
+              <div class="checkbox-inner">
+                <input type="checkbox" id="suspect-toggle" />
+                Show Suspect Transcripts
+              </div>
+            </label>
+            <label class="checkbox-label">
+              <div class="checkbox-inner">
+                <input type="checkbox" id="bookmarks-only-toggle" />
+                Bookmarks Only
+              </div>
+            </label>
           </div>
-        </label>
-        <button id="save-profile" class="btn">Save Profile</button>
-      </div>
+        </section>
 
-      <div class="sidebar-footer">
-        <button id="export-csv" class="btn btn-primary">Export CSV Log</button>
-        <div id="current-profile" class="current-profile">Loading profile…</div>
-        <button id="logout-button" class="btn btn-quiet">Sign out</button>
+        <section class="control-card alerts-control-card">
+          <div class="section-title section-title-row">
+            <span>Emergency Highlights</span>
+            <span id="keyword-count" class="section-count"></span>
+          </div>
+          <input
+            type="text"
+            id="new-keyword"
+            placeholder="Add keyword + Enter"
+            class="search-input keyword-input"
+          />
+          <div id="keyword-list" class="keyword-list"></div>
+        </section>
+
+        <section class="control-card date-control-card">
+          <div class="section-title">Date &amp; Time</div>
+          <div class="date-filter-grid">
+            <input
+              type="date"
+              id="filter-date"
+              class="search-input"
+              aria-label="Recording Date"
+            />
+            <select
+              id="filter-start"
+              class="search-input"
+              aria-label="Start Time"
+            ></select>
+            <select
+              id="filter-end"
+              class="search-input"
+              aria-label="End Time"
+            ></select>
+          </div>
+          <div class="filter-actions">
+            <button id="apply-date-filter" class="btn">Apply</button>
+            <button id="clear-date-filter" class="btn btn-quiet">Clear</button>
+          </div>
+        </section>
+
+        <section class="control-card feeds-section">
+          <div class="section-title">Active Feeds</div>
+          <div class="toggle-group" id="channel-toggles"></div>
+        </section>
+
+        <section id="profile-admin-section" class="control-card profile-control-card" hidden>
+          <div class="section-title">Access Profiles</div>
+          <div class="profile-editor">
+            <div id="profile-list" class="profile-list"></div>
+            <div>
+              <input id="profile-username" class="search-input" placeholder="Username" />
+              <input id="profile-display-name" class="search-input" placeholder="Display name" />
+              <input id="profile-password" class="search-input" type="password" placeholder="New password" />
+              <select id="profile-role" class="search-input">
+                <option value="viewer">Viewer · transcript only</option>
+                <option value="operator">Operator · audio and review</option>
+                <option value="supervisor">Supervisor · correct and export</option>
+                <option value="admin">Admin · manage profiles</option>
+              </select>
+              <label class="checkbox-label">
+                <div class="checkbox-inner">
+                  <input id="profile-active" type="checkbox" checked />
+                  Profile Active
+                </div>
+              </label>
+              <button id="save-profile" class="btn">Save Profile</button>
+            </div>
+          </div>
+        </section>
       </div>
-    </nav>
+    </header>
 
     <main id="dashboard" aria-label="Radio transcript feeds"></main>
+
+    <section id="console-panel" class="console-panel" aria-label="Program console" hidden>
+      <div class="console-header">
+        <div>
+          <div class="console-title"><span aria-hidden="true">&gt;_</span> Program Console</div>
+          <div id="console-status" class="console-status">Console ready</div>
+        </div>
+        <div class="console-controls">
+          <label>
+            <span>Service</span>
+            <select id="console-service">
+              <option value="all">All services</option>
+              <option value="server">Dashboard server</option>
+              <option value="worker">Transcription worker</option>
+              <option value="sync">Recording sync</option>
+              <option value="browser">Dashboard events</option>
+            </select>
+          </label>
+          <label>
+            <span>Level</span>
+            <select id="console-level">
+              <option value="all">All levels</option>
+              <option value="error">Errors</option>
+              <option value="warning">Warnings</option>
+              <option value="info">Info</option>
+            </select>
+          </label>
+          <button id="console-pause-button" class="console-button" type="button">Pause</button>
+          <button id="console-refresh-button" class="console-button" type="button">Refresh</button>
+          <button id="console-clear-button" class="console-button" type="button">Clear view</button>
+          <button id="console-close-button" class="console-button console-close-button" type="button" aria-label="Close console">×</button>
+        </div>
+      </div>
+      <div id="console-output" class="console-output" role="log" aria-live="polite"></div>
+    </section>
+
     <div id="empty-state" class="empty-state" hidden>
       <strong>No matching transmissions</strong>
       <span>Try a broader search or clear the date and time filter.</span>
     </div>
     <div id="toast-container"></div>
 
-    <script src="/static/js/app.js?v=20260726-1"></script>
+    <script src="/static/js/app.js?v=20260727-6"></script>
   </body>
 </html>

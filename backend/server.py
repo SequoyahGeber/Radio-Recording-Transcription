@@ -3,9 +3,10 @@ import io
 import json
 import logging
 import os
-import sqlite3
+import re
 import threading
 import time
+import zlib
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from typing import List, Optional
@@ -20,6 +21,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from backend.config import (
     AUDIO_DIR,
     DB_NAME,
+    LOG_DIR,
     PROJECT_ROOT,
     RADIO_HOST,
     RECORDING_SOURCE_DIR,
@@ -97,6 +99,18 @@ login_failures = defaultdict(deque)
 login_lock = threading.Lock()
 stats_lock = threading.Lock()
 stats_cache = {"at": 0.0, "payload": None}
+audio_count_lock = threading.Lock()
+audio_count_cache = {"at": 0.0, "value": 0}
+LOG_FILE_NAMES = {
+    "server": "server.log",
+    "worker": "worker.log",
+    "sync": "sync.log",
+}
+LOG_TIMESTAMP_PATTERN = re.compile(
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2}[T ][0-9:.+-]+)"
+    r"(?:\s+-\s+(?P<level>INFO|WARNING|ERROR|CRITICAL)\s+-\s+)?"
+)
+ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 class TranscriptPayload(BaseModel):
@@ -219,10 +233,31 @@ def read_html(filename):
 
 
 def count_audio_files():
-    total = 0
-    for _, _, files in os.walk(AUDIO_DIR):
-        total += sum(name.lower().endswith((".mp3", ".wav", ".m4a")) for name in files)
-    return total
+    with audio_count_lock:
+        if time.time() - audio_count_cache["at"] < 30:
+            return audio_count_cache["value"]
+
+        total = 0
+        pending_directories = [AUDIO_DIR]
+        while pending_directories:
+            directory = pending_directories.pop()
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                pending_directories.append(entry.path)
+                            elif entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(
+                                (".mp3", ".wav", ".m4a")
+                            ):
+                                total += 1
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+
+        audio_count_cache.update({"at": time.time(), "value": total})
+        return total
 
 
 def read_heartbeats():
@@ -320,6 +355,7 @@ def transcript_row_to_dict(row):
 def query_transcripts(
     query="",
     after_id=None,
+    before_id=None,
     limit=500,
     date_value="",
     start_time="",
@@ -334,6 +370,23 @@ def query_transcripts(
     if after_id is not None:
         clauses.append("id > ?")
         parameters.append(after_id)
+    if before_id is not None:
+        clauses.append(
+            """
+            (
+                recorded_at < (
+                    SELECT recorded_at FROM transcripts WHERE id = ?
+                )
+                OR (
+                    recorded_at = (
+                        SELECT recorded_at FROM transcripts WHERE id = ?
+                    )
+                    AND id < ?
+                )
+            )
+            """
+        )
+        parameters.extend([before_id, before_id, before_id])
     if query:
         like = f"%{query.lower()}%"
         clauses.append(
@@ -364,7 +417,11 @@ def query_transcripts(
     if bookmarked:
         clauses.append("bookmarked = 1")
 
-    order = "ASC" if after_id is not None else "DESC"
+    order_by = (
+        "id ASC"
+        if after_id is not None
+        else "recorded_at DESC, id DESC"
+    )
     parameters.append(max(1, min(limit, 2000)))
     sql = f"""
         SELECT id, timestamp, recorded_at, filename, transcript_text,
@@ -372,7 +429,7 @@ def query_transcripts(
                notes, corrected_by, corrected_at
         FROM transcripts
         WHERE {' AND '.join(clauses)}
-        ORDER BY id {order}
+        ORDER BY {order_by}
         LIMIT ?
     """
     with connect(read_only=True) as connection:
@@ -380,6 +437,76 @@ def query_transcripts(
     if after_id is None:
         rows = list(reversed(rows))
     return [transcript_row_to_dict(row) for row in rows]
+
+
+def read_log_tail(path, line_limit, byte_limit=512 * 1024):
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            chunks = []
+            newline_count = 0
+            bytes_read = 0
+            while position > 0 and newline_count <= line_limit and bytes_read < byte_limit:
+                chunk_size = min(16 * 1024, position, byte_limit - bytes_read)
+                position -= chunk_size
+                handle.seek(position)
+                chunk = handle.read(chunk_size)
+                chunks.append(chunk)
+                bytes_read += len(chunk)
+                newline_count += chunk.count(b"\n")
+    except OSError:
+        return []
+    content = b"".join(reversed(chunks)).decode("utf-8", errors="replace")
+    return content.splitlines()[-line_limit:]
+
+
+def infer_log_level(line):
+    lowered = line.lower()
+    if any(word in lowered for word in ("critical", "traceback", "exception", "error", "failed")):
+        return "error"
+    if any(word in lowered for word in ("warning", "warn", "unavailable", "paused", "waiting")):
+        return "warning"
+    return "info"
+
+
+def console_log_entries(service, line_limit):
+    services = list(LOG_FILE_NAMES) if service == "all" else [service]
+    entries = []
+    for source in services:
+        path = os.path.join(LOG_DIR, LOG_FILE_NAMES[source])
+        try:
+            fallback_time = os.path.getmtime(path)
+        except OSError:
+            fallback_time = time.time()
+        for line_number, raw_line in enumerate(read_log_tail(path, line_limit)):
+            message = ANSI_ESCAPE_PATTERN.sub("", raw_line).strip()
+            if not message:
+                continue
+            match = LOG_TIMESTAMP_PATTERN.match(message)
+            timestamp = (
+                match.group("timestamp").replace(" ", "T")
+                if match
+                else datetime.fromtimestamp(
+                    fallback_time + line_number / 1_000_000
+                ).isoformat()
+            )
+            explicit_level = match.group("level").lower() if match and match.group("level") else ""
+            level = infer_log_level(message) if not explicit_level else explicit_level
+            signature = zlib.crc32(
+                f"{source}:{line_number}:{message}".encode("utf-8", errors="replace")
+            )
+            entries.append(
+                {
+                    "id": f"{source}-{signature:08x}",
+                    "timestamp": timestamp,
+                    "source": source,
+                    "level": "error" if level == "critical" else level,
+                    "message": message[:4000],
+                }
+            )
+    entries.sort(key=lambda entry: (entry["timestamp"], entry["source"], entry["id"]))
+    return entries[-line_limit:]
 
 
 app.mount("/static", StaticFiles(directory=os.path.join(PROJECT_ROOT, "frontend")), name="static")
@@ -445,6 +572,7 @@ def get_current_profile(request: Request):
             "export": role_allows(session, "supervisor"),
             "profiles": role_allows(session, "admin"),
             "suspect": role_allows(session, "supervisor"),
+            "console": role_allows(session, "admin"),
         },
     }
 
@@ -468,11 +596,27 @@ def get_stats():
         return payload
 
 
+@app.get("/api/console")
+def get_console(
+    request: Request,
+    service: str = "all",
+    lines: int = 250,
+):
+    require_role(request, "admin")
+    if service not in {"all", *LOG_FILE_NAMES.keys()}:
+        raise HTTPException(status_code=400, detail="Unknown console service")
+    return {
+        "entries": console_log_entries(service, max(20, min(lines, 500))),
+        "services": list(LOG_FILE_NAMES),
+    }
+
+
 @app.get("/api/history")
 def get_history(
     request: Request,
     q: str = Query("", max_length=200),
     after_id: Optional[int] = None,
+    before_id: Optional[int] = None,
     limit: int = 500,
     date: str = "",
     start: str = "",
@@ -481,10 +625,16 @@ def get_history(
     bookmarked: bool = False,
 ):
     session = require_role(request, "viewer")
+    if after_id is not None and before_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="Choose either newer or older archive pagination",
+        )
     include_suspect = include_suspect and role_allows(session, "supervisor")
     return query_transcripts(
         query=q.strip(),
         after_id=after_id,
+        before_id=before_id,
         limit=limit,
         date_value=date,
         start_time=start,
