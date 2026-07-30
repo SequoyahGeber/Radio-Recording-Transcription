@@ -11,10 +11,18 @@ SCRIPT_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_PROJECT_ROOT not in sys.path:
     sys.path.insert(0, SCRIPT_PROJECT_ROOT)
 
-from backend.config import PROJECT_ROOT, RADIO_HOST, RADIO_PORT, RUNTIME_DIR, save_settings
+from backend.config import (
+    PROJECT_ROOT,
+    RADIO_HOST,
+    RADIO_PORT,
+    RUNTIME_DIR,
+    load_settings,
+    save_settings,
+)
 
 
 PID_PATH = os.path.join(RUNTIME_DIR, "supervisor.pid")
+STATUS_PATH = os.path.join(RUNTIME_DIR, "service-status.json")
 SUPERVISOR_PATH = os.path.join(PROJECT_ROOT, "scripts", "supervisor.py")
 
 
@@ -39,10 +47,24 @@ def process_is_running(pid):
 def status():
     pid = read_pid()
     running = process_is_running(pid)
+    settings = load_settings()
+    transcription_enabled = bool(settings.get("transcription_enabled", True))
+    transcription_running = False
+    if running:
+        try:
+            with open(STATUS_PATH, "r", encoding="utf-8") as handle:
+                service_status = json.load(handle)
+            if service_status.get("supervisor_pid") == pid:
+                worker = service_status.get("processes", {}).get("worker", {})
+                transcription_running = bool(worker.get("running"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
     dashboard_host = "127.0.0.1" if RADIO_HOST in {"0.0.0.0", "::"} else RADIO_HOST
     return {
         "running": running,
         "pid": pid if running else None,
+        "transcription_enabled": transcription_enabled,
+        "transcription_running": transcription_running,
         "host": RADIO_HOST,
         "port": RADIO_PORT,
         "dashboard": f"https://{dashboard_host}:{RADIO_PORT}",
@@ -90,9 +112,37 @@ def stop():
     return status()
 
 
+def set_transcription(enabled):
+    save_settings({"transcription_enabled": enabled})
+    if enabled and not status()["running"]:
+        start()
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        current = status()
+        if current["transcription_running"] == enabled:
+            return current
+        if not current["running"] and not enabled:
+            return current
+        time.sleep(0.2)
+    action = "start" if enabled else "stop"
+    raise RuntimeError(f"The transcription worker did not {action}")
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["start", "stop", "restart", "status", "configure"])
+    parser.add_argument(
+        "action",
+        choices=[
+            "start",
+            "stop",
+            "restart",
+            "status",
+            "configure",
+            "transcription-start",
+            "transcription-stop",
+        ],
+    )
     parser.add_argument("--source")
     parser.add_argument("--host")
     parser.add_argument("--port", type=int)
@@ -117,6 +167,10 @@ def main():
     elif args.action == "restart":
         stop()
         result = start()
+    elif args.action == "transcription-start":
+        result = set_transcription(True)
+    elif args.action == "transcription-stop":
+        result = set_transcription(False)
     else:
         result = status()
     print(json.dumps(result, sort_keys=True))

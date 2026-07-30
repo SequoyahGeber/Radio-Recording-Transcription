@@ -17,4 +17,7 @@ Future updates can be installed from App Controls > Updates. Updates replace
 only the application; recordings, transcripts, profiles, credentials, and
 settings remain in Application Support.
 
+App Controls > Stop Transcription pauses the transcription worker without
+stopping the dashboard or recording sync. The control remembers your choice.
+
 This build is for Apple silicon Macs running macOS 13 or newer.

@@ -18,6 +18,7 @@ DATA_SNAPSHOT="$BACKUP_DIR/user-data-before-update"
 OLDER_DATA_SNAPSHOT="$BACKUP_DIR/user-data-older"
 TARGET_MOVED=0
 NEW_INSTALLED=0
+NEW_PID=""
 
 log() {
     /bin/echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*"
@@ -52,6 +53,13 @@ rollback() {
     fi
     set +e
     log "Rolling back to version $OLD_VERSION"
+    if [[ -n "$NEW_PID" ]]; then
+        /bin/kill -TERM "$NEW_PID" 2>/dev/null
+        for _ in {1..30}; do
+            /bin/kill -0 "$NEW_PID" 2>/dev/null || break
+            /bin/sleep 0.1
+        done
+    fi
     if [[ "$NEW_INSTALLED" -eq 1 && -e "$APP_PATH" ]]; then
         /bin/rm -rf "$APP_PATH"
     fi
@@ -136,13 +144,17 @@ INSTALLED_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionStri
 /usr/bin/open -n "$APP_PATH"
 LAUNCHED=0
 for _ in {1..50}; do
-    if /usr/bin/pgrep -f "$APP_PATH/Contents/MacOS/RadioCommandCenter" >/dev/null; then
+    NEW_PID="$(/usr/bin/pgrep -f "$APP_PATH/Contents/MacOS/RadioCommandCenter" | /usr/bin/head -1 || true)"
+    if [[ -n "$NEW_PID" ]]; then
         LAUNCHED=1
         break
     fi
     /bin/sleep 0.2
 done
 [[ "$LAUNCHED" -eq 1 ]] || fail "the updated application did not launch"
+/bin/sleep 3
+/usr/bin/codesign --verify --deep --strict "$APP_PATH" \
+    || fail "the updated application changed after launch"
 
 NEW_INSTALLED=0
 TARGET_MOVED=0

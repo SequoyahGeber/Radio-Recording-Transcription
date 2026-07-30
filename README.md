@@ -4,7 +4,7 @@ A private, local radio-recording transcription system for Apple Silicon Macs.
 It synchronizes recordings from a local or mounted network folder, transcribes
 them with Whisper, and presents a secure live operations dashboard.
 
-## What changed in version 2
+## Current capabilities
 
 - Live recordings are synchronized before historical backlog batches.
 - Source files must be stable across scans and copied files can be SHA-256 verified.
@@ -20,6 +20,7 @@ them with Whisper, and presents a secure live operations dashboard.
 - The newest 100 transmissions load first; scrolling upward fetches older pages.
 - Operators can inspect browser, server, transcription, and sync events in the dashboard console.
 - A native Mac launcher embeds the secure dashboard alongside service and folder controls.
+- Administrators can pause or resume transcription without stopping the dashboard or sync service.
 - Administrators can check GitHub Releases and install verified app updates in place.
 - A process supervisor supplies backoff, clean shutdown, and rotating service logs.
 
@@ -41,6 +42,11 @@ detects Homebrew's linked and versioned Python locations and installs
 
 The original `Start Radio Command Center.command` remains available as a
 terminal-based launcher.
+
+Administrators can expand **App Controls** and choose **Stop Transcription** to
+leave the dashboard and recording sync available without running the
+transcription engine. The same control changes to **Start Transcription**, and
+the selected state persists across app restarts and updates.
 
 ## Clearance profiles
 
@@ -147,7 +153,7 @@ DMG filename, bundle version, and release tag must match exactly.
 ## Operations and recovery
 
 Service logs can be viewed from **Console** by the administrator. The native
-app can restart all services.
+app can restart all services or control the transcription worker independently.
 Transcripts are committed before dashboard delivery, so a web-server outage
 does not lose results. The dashboard catches up from its last seen database ID
 after reconnecting.

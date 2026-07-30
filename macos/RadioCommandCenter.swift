@@ -7,6 +7,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     WKScriptMessageHandler, NSTableViewDataSource, NSTableViewDelegate {
     private struct ServiceSnapshot {
         let running: Bool
+        let transcriptionEnabled: Bool
+        let transcriptionRunning: Bool
         let sourcePath: String
         let dashboardURL: URL?
     }
@@ -20,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var sourceField: NSTextField!
     private var webView: WKWebView!
     private var chooseSourceButton: NSButton!
+    private var transcriptionButton: NSButton!
     private var updateButton: NSButton!
     private var sourcePanel: NSPanel?
     private var folderPathField: NSTextField!
@@ -37,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var statusRefreshInFlight = false
     private var updateCheckInFlight = false
     private var automaticUpdateChecked = false
+    private var transcriptionEnabled = true
     private let collapsedHeaderHeight: CGFloat = 46
     private let expandedHeaderHeight: CGFloat = 104
 
@@ -167,6 +171,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         updateButton.autoresizingMask = [.minXMargin]
         appHeader.addSubview(updateButton)
 
+        transcriptionButton = button(
+            "Stop Transcription",
+            action: #selector(toggleTranscription)
+        )
+        transcriptionButton.frame = NSRect(x: 850, y: 8, width: 190, height: 30)
+        transcriptionButton.autoresizingMask = [.minXMargin, .minYMargin]
+        appHeader.addSubview(transcriptionButton)
+
         appHeaderToggleButton = button("App Controls", action: #selector(toggleAppHeader))
         appHeaderToggleButton.frame = NSRect(x: 1068, y: 8, width: 132, height: 30)
         appHeaderToggleButton.autoresizingMask = [.minXMargin, .minYMargin]
@@ -177,6 +189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             sourceTitle,
             sourceField,
             chooseSourceButton,
+            transcriptionButton,
             startButton,
             restartButton,
             stopButton,
@@ -284,6 +297,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         process.currentDirectoryURL = projectRoot
         var environment = ProcessInfo.processInfo.environment
         environment["RADIO_DATA_DIR"] = applicationDataURL.path
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
         if let resources = Bundle.main.resourceURL, bundledRuntimeRoot != nil {
             let pythonHome = resources.appendingPathComponent(
                 "python/Python.framework/Versions/3.12"
@@ -343,6 +357,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         process.currentDirectoryURL = projectRoot
         var environment = ProcessInfo.processInfo.environment
         environment["RADIO_DATA_DIR"] = applicationDataURL.path
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
         if let resources = Bundle.main.resourceURL, bundledRuntimeRoot != nil {
             let pythonHome = resources.appendingPathComponent(
                 "python/Python.framework/Versions/3.12"
@@ -579,6 +594,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             let dashboardHost = ["0.0.0.0", "::"].contains(host) ? "127.0.0.1" : host
             let snapshot = ServiceSnapshot(
                 running: running,
+                transcriptionEnabled: settings["transcription_enabled"] as? Bool ?? true,
+                transcriptionRunning: {
+                    guard running, let supervisorPID = pid else { return false }
+                    let statusURL = URL(fileURLWithPath: runtimePath, isDirectory: true)
+                        .appendingPathComponent("service-status.json")
+                    guard
+                        let data = try? Data(contentsOf: statusURL),
+                        let value = try? JSONSerialization.jsonObject(with: data)
+                            as? [String: Any],
+                        (value["supervisor_pid"] as? Int) == Int(supervisorPID),
+                        let processes = value["processes"] as? [String: Any],
+                        let worker = processes["worker"] as? [String: Any]
+                    else { return false }
+                    return worker["running"] as? Bool ?? false
+                }(),
                 sourcePath: settings["source_dir"] as? String ?? "/Volumes/Active Recording",
                 dashboardURL: URL(string: "https://\(dashboardHost):\(port)")
             )
@@ -586,8 +616,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.statusRefreshInFlight = false
+                self.transcriptionEnabled = snapshot.transcriptionEnabled
+                self.transcriptionButton.title = snapshot.transcriptionEnabled
+                    ? "Stop Transcription"
+                    : "Start Transcription"
                 self.statusLabel.stringValue = snapshot.running
-                    ? "● Services running"
+                    ? (
+                        snapshot.transcriptionRunning
+                            ? "● Dashboard on · Transcribing"
+                            : "● Dashboard on · Transcription off"
+                    )
                     : "○ Services stopped"
                 self.statusLabel.textColor = snapshot.running ? .systemGreen : .secondaryLabelColor
                 self.sourceField.stringValue = snapshot.sourcePath
@@ -925,6 +963,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     @objc private func stopServices() {
         statusLabel.stringValue = "Stopping services…"
         runControl(["stop"]) { [weak self] _ in self?.refreshStatus() }
+    }
+
+    @objc private func toggleTranscription() {
+        let enable = !transcriptionEnabled
+        transcriptionButton.isEnabled = false
+        statusLabel.stringValue = enable
+            ? "Starting transcription…"
+            : "Stopping transcription…"
+        let action = enable ? "transcription-start" : "transcription-stop"
+        runControl([action]) { [weak self] value in
+            guard let self else { return }
+            self.transcriptionButton.isEnabled = true
+            if value != nil {
+                self.transcriptionEnabled = enable
+            }
+            self.refreshStatus()
+        }
     }
 
     @objc private func reloadDashboard() {

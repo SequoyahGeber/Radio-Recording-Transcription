@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 import signal
 import subprocess
@@ -18,10 +19,12 @@ from backend.config import (
     RUNTIME_DIR,
     TLS_CERT_PATH,
     TLS_KEY_PATH,
+    load_settings,
 )
 
 
 PID_PATH = os.path.join(RUNTIME_DIR, "supervisor.pid")
+STATUS_PATH = os.path.join(RUNTIME_DIR, "service-status.json")
 STOPPING = False
 MAX_LOG_BYTES = 10 * 1024 * 1024
 
@@ -60,6 +63,41 @@ def remove_pid():
         pass
 
 
+def write_status(processes, transcription_enabled):
+    status = {
+        "supervisor_pid": os.getpid(),
+        "transcription_enabled": transcription_enabled,
+        "processes": {
+            process.name: {
+                "pid": process.pid,
+                "running": process.running,
+            }
+            for process in processes
+        },
+    }
+    temporary_path = f"{STATUS_PATH}.tmp"
+    try:
+        with open(temporary_path, "w", encoding="utf-8") as handle:
+            json.dump(status, handle, sort_keys=True)
+        os.replace(temporary_path, STATUS_PATH)
+    except OSError:
+        try:
+            os.unlink(temporary_path)
+        except OSError:
+            pass
+
+
+def remove_status():
+    try:
+        os.unlink(STATUS_PATH)
+    except OSError:
+        pass
+
+
+def transcription_is_enabled():
+    return bool(load_settings().get("transcription_enabled", True))
+
+
 def handle_signal(signum, frame):
     del signum, frame
     global STOPPING
@@ -76,6 +114,14 @@ class ManagedProcess:
         self.next_start = 0
         self.started_at = 0
         self.log_handle = None
+
+    @property
+    def running(self):
+        return self.process is not None and self.process.poll() is None
+
+    @property
+    def pid(self):
+        return self.process.pid if self.running else None
 
     def start(self):
         log_path = os.path.join(LOG_DIR, f"{self.name}.log")
@@ -115,17 +161,27 @@ class ManagedProcess:
         self.next_start = time.monotonic() + delay
 
     def stop(self):
-        if self.process is None or self.process.poll() is not None:
+        if self.process is None:
             return
-        self.process.terminate()
-        try:
-            self.process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.wait(timeout=5)
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
         if self.log_handle:
             self.log_handle.close()
             self.log_handle = None
+        self.process = None
+        self.failure_count = 0
+        self.next_start = 0
+
+    def reconcile(self, enabled):
+        if enabled:
+            self.poll_and_restart_if_needed()
+        else:
+            self.stop()
 
 
 def main():
@@ -184,15 +240,20 @@ def main():
         ManagedProcess("worker", [sys.executable, "-m", "backend.worker"], environment),
         ManagedProcess("sync", [sys.executable, os.path.join(PROJECT_ROOT, "sync.py")], environment),
     ]
+    process_by_name = {process.name: process for process in processes}
 
     try:
         while not STOPPING:
-            for process in processes:
-                process.poll_and_restart_if_needed()
+            transcription_enabled = transcription_is_enabled()
+            process_by_name["server"].poll_and_restart_if_needed()
+            process_by_name["sync"].poll_and_restart_if_needed()
+            process_by_name["worker"].reconcile(transcription_enabled)
+            write_status(processes, transcription_enabled)
             time.sleep(1)
     finally:
         for process in reversed(processes):
             process.stop()
+        remove_status()
         remove_pid()
 
 
