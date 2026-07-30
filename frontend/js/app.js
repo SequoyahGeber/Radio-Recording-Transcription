@@ -92,6 +92,12 @@ function triggerDesktopNotification(channel, text) {
 const dashboard = document.getElementById("dashboard");
 const togglesContainer = document.getElementById("channel-toggles");
 const globalSearchInput = document.getElementById("global-search");
+const mobileFeedSwitcher = document.getElementById("mobile-feed-switcher");
+const mobileFeedSelect = document.getElementById("mobile-feed-select");
+const mobileFeedPosition = document.getElementById("mobile-feed-position");
+const mobileFeedPrevious = document.getElementById("mobile-feed-previous");
+const mobileFeedNext = document.getElementById("mobile-feed-next");
+const mobileViewport = window.matchMedia("(max-width: 699px)");
 globalSearchInput.value = "";
 const knownChannels = new Set();
 const processedMessages = new Set();
@@ -113,6 +119,8 @@ let bookmarksOnly = false;
 let renderBatchDepth = 0;
 let lastReportedServiceState = "";
 let clientFiltersApplied = false;
+let mobileActiveChannel =
+  localStorage.getItem("radioMobileActiveFeed") || "";
 const INITIAL_ARCHIVE_LIMIT = 100;
 const ARCHIVE_PAGE_SIZE = 100;
 const ARCHIVE_FETCH_LIMIT = ARCHIVE_PAGE_SIZE + 1;
@@ -543,6 +551,78 @@ function restoreColumnOrder() {
     .forEach((column) => dashboard.appendChild(column));
 }
 
+function mobileEligibleColumns() {
+  return [...dashboard.querySelectorAll(".channel-column")].filter(
+    (column) =>
+      !column.classList.contains("channel-user-hidden") &&
+      !column.classList.contains("hidden-search-column"),
+  );
+}
+
+function setActiveMobileFeed(channelName, focus = false) {
+  const columns = mobileEligibleColumns();
+  const selected =
+    columns.find((column) => column.dataset.channel === channelName) ||
+    columns[0] ||
+    null;
+  mobileActiveChannel = selected?.dataset.channel || "";
+  if (mobileActiveChannel) {
+    localStorage.setItem("radioMobileActiveFeed", mobileActiveChannel);
+  }
+  dashboard.querySelectorAll(".channel-column").forEach((column) => {
+    column.classList.toggle("mobile-feed-active", column === selected);
+  });
+  if (selected) {
+    mobileFeedSelect.value = selected.dataset.channel;
+    const selectedIndex = columns.indexOf(selected);
+    mobileFeedPosition.innerText = `${selectedIndex + 1} / ${columns.length}`;
+    const columnId = selected.id;
+    unreadCounts[columnId] = 0;
+    const badge = document.getElementById(`badge-${columnId}`);
+    if (badge) {
+      badge.innerText = "0";
+      badge.style.display = "none";
+    }
+    const followButton = selected.querySelector(
+      '[data-action="toggle-auto-scroll"]',
+    );
+    setFollowButtonState(columnId, followButton);
+    if (focus && mobileViewport.matches) {
+      selected.querySelector(".messages-container")?.focus({ preventScroll: true });
+    }
+  } else {
+    mobileFeedPosition.innerText = "0 / 0";
+  }
+  mobileFeedPrevious.disabled = columns.length < 2;
+  mobileFeedNext.disabled = columns.length < 2;
+}
+
+function updateMobileFeedSwitcher() {
+  const columns = mobileEligibleColumns();
+  const previousValue = mobileActiveChannel;
+  mobileFeedSelect.replaceChildren();
+  columns.forEach((column) => {
+    const option = document.createElement("option");
+    option.value = column.dataset.channel;
+    option.textContent = column.dataset.channel;
+    mobileFeedSelect.appendChild(option);
+  });
+  mobileFeedSelect.disabled = columns.length === 0;
+  setActiveMobileFeed(previousValue);
+  mobileFeedSwitcher.classList.toggle("has-multiple-feeds", columns.length > 1);
+}
+
+function stepMobileFeed(direction) {
+  const columns = mobileEligibleColumns();
+  if (columns.length < 2) return;
+  const currentIndex = Math.max(
+    0,
+    columns.findIndex((column) => column.dataset.channel === mobileActiveChannel),
+  );
+  const nextIndex = (currentIndex + direction + columns.length) % columns.length;
+  setActiveMobileFeed(columns[nextIndex].dataset.channel, true);
+}
+
 function hasMeaningfulTranscript(text) {
   const withoutMarkers = String(text || "").replace(
     /[\[(](?:blank[_ ]audio|silence|music|no speech|inaudible)[\])]/gi,
@@ -604,15 +684,16 @@ function createColumn(channelName, announce = true) {
               <div class="col-actions">
                   <button class="arrow-btn" data-action="move-column" data-column-id="${colId}" data-direction="left" title="Move left" aria-label="Move ${safeChannelName} left">◀</button>
                   <button class="arrow-btn" data-action="move-column" data-column-id="${colId}" data-direction="right" title="Move right" aria-label="Move ${safeChannelName} right">▶</button>
-                  <button class="scroll-toggle active" data-action="toggle-auto-scroll" data-column-id="${colId}">Follow</button>
+                  <button class="scroll-toggle active" data-action="toggle-auto-scroll" data-column-id="${colId}" aria-pressed="true">Following live</button>
               </div>
           </div>
       </div>
-      <div class="messages-container" id="msgs-${colId}"></div>
+      <div class="messages-container" id="msgs-${colId}" tabindex="-1"></div>
   `;
 
   dashboard.appendChild(col);
   restoreColumnOrder();
+  updateMobileFeedSwitcher();
   if (announce) showToast(`New Channel Connected: ${channelName}`);
   return document.getElementById(`msgs-${colId}`);
 }
@@ -636,6 +717,7 @@ function moveColumn(colId, direction) {
     (column) => column.dataset.channel,
   );
   saveColumnPreferences();
+  updateMobileFeedSwitcher();
 }
 
 function updatePlayState(audio, state) {
@@ -653,17 +735,6 @@ function updatePlayState(audio, state) {
     }
   }
 
-  const cardButton = audio.closest(".message-card")?.querySelector(".audio-link");
-  if (cardButton) {
-    const playing = state === "playing" || state === "waiting";
-    cardButton.classList.toggle("active", playing);
-    cardButton.querySelector("span").innerText =
-      state === "playing" ? "Pause" : state === "waiting" ? "Loading" : "Audio";
-    cardButton.setAttribute(
-      "aria-label",
-      playing ? "Pause audio recording" : "Play audio recording",
-    );
-  }
 }
 
 function toggleAudio(audio) {
@@ -688,10 +759,6 @@ function toggleAudio(audio) {
 
 function togglePlay(btn) {
   toggleAudio(btn.parentElement.querySelector("audio"));
-}
-
-function toggleCardAudio(btn) {
-  toggleAudio(btn.closest(".message-card")?.querySelector("audio"));
 }
 
 function updateProgress(audio) {
@@ -803,19 +870,28 @@ function createMessageCard(data) {
     data.retry_status === "selected"
       ? '<span class="correction-badge" title="The Medium result was replaced after a selective second pass">Large V3 rescue</span>'
       : "";
+  const reviewedBadge = data.reviewed
+    ? '<span class="card-state-badge reviewed-state">✓ Reviewed</span>'
+    : "";
+  const bookmarkBadge = data.bookmarked
+    ? '<span class="card-state-badge bookmark-state">★ Saved</span>'
+    : "";
   const actionButtons = canReview
     ? `
-      <div class="message-actions">
-        <button class="card-action ${data.reviewed ? "active" : ""}" data-action="review-transcript" title="Mark reviewed">✓ Reviewed</button>
-        <button class="card-action ${data.bookmarked ? "active" : ""}" data-action="bookmark-transcript" title="Bookmark transmission">★ Bookmark</button>
-        <button class="card-action" data-action="note-transcript" title="Add an operator note">Note</button>
-        ${canCorrect ? '<button class="card-action" data-action="correct-transcript" title="Correct transcript">Correct</button>' : ""}
-      </div>`
+      <details class="card-actions-menu">
+        <summary aria-label="More transmission actions">More</summary>
+        <div class="message-actions" role="menu">
+          <button class="card-action ${data.reviewed ? "active" : ""}" data-action="review-transcript" role="menuitem">${data.reviewed ? "Mark unreviewed" : "Mark reviewed"}</button>
+          <button class="card-action ${data.bookmarked ? "active" : ""}" data-action="bookmark-transcript" role="menuitem">${data.bookmarked ? "Remove bookmark" : "Bookmark"}</button>
+          <button class="card-action" data-action="note-transcript" role="menuitem">${data.notes ? "Edit note" : "Add note"}</button>
+          ${canCorrect ? '<button class="card-action" data-action="correct-transcript" role="menuitem">Correct transcript</button>' : ""}
+        </div>
+      </details>`
     : "";
   const audioPlayer = canAudio
     ? `
       <div class="custom-audio-player">
-          <button class="play-btn" data-action="toggle-play" aria-label="Play recording">▶</button>
+          <button class="play-btn" data-action="toggle-play" aria-label="Play recording" title="Play recording">▶</button>
           <div class="progress-bar-container" data-action="seek-audio">
               <div class="progress-fill"></div>
           </div>
@@ -827,13 +903,15 @@ function createMessageCard(data) {
   card.innerHTML = `
       <div class="msg-meta">
           <div class="msg-datetime"><span class="msg-date">${dateStr}</span><span class="msg-time">${timeStr}</span></div>
-          <div>${qualityBadge}${rescueBadge}${correctionBadge}${canAudio ? `<button type="button" class="audio-link" data-action="toggle-card-audio" title="Play audio recording" aria-label="Play audio recording"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 9v6h4l5 4V5L9 9H5Z"></path><path d="M17 9.5a3.5 3.5 0 0 1 0 5"></path></svg><span>Audio</span></button>` : ""}</div>
+          <div class="card-meta-actions">
+            <div class="card-state-badges">${qualityBadge}${rescueBadge}${correctionBadge}${reviewedBadge}${bookmarkBadge}</div>
+            ${actionButtons}
+          </div>
       </div>
       <div class="transcript-content" data-clean="${encodedCleanText}">
           ${highlightText(cleanText)}
       </div>
       ${data.notes ? `<div class="operator-note">${escapeHTML(data.notes)}</div>` : ""}
-      ${actionButtons}
       ${audioPlayer}
   `;
   return card;
@@ -893,15 +971,33 @@ function toggleColumn(colId, isChecked) {
     badge.innerText = "0";
   }
   updateSearchResults();
+  updateMobileFeedSwitcher();
+}
+
+function setFollowButtonState(colId, button = null) {
+  const control =
+    button ||
+    document.querySelector(
+      `[data-action="toggle-auto-scroll"][data-column-id="${CSS.escape(colId)}"]`,
+    );
+  if (!control) return;
+  const following = Boolean(autoScrollState[colId]);
+  const newCount = Number(unreadCounts[colId] || 0);
+  control.classList.toggle("active", following);
+  control.setAttribute("aria-pressed", String(following));
+  control.innerText = following
+    ? "Following live"
+    : `Paused${newCount ? ` · ${newCount} new` : ""}`;
 }
 
 function toggleAutoScroll(colId, btn) {
   autoScrollState[colId] = !autoScrollState[colId];
-  btn.classList.toggle("active", autoScrollState[colId]);
   if (autoScrollState[colId]) {
+    unreadCounts[colId] = 0;
     const container = document.getElementById(`msgs-${colId}`);
     if (container) container.scrollTop = container.scrollHeight;
   }
+  setFollowButtonState(colId, btn);
 }
 
 function timeToMinutes(time) {
@@ -1007,6 +1103,7 @@ function updateSearchResults() {
   emptyState.querySelector("span").innerText = filtering
     ? "Try a broader search or clear the date and time filter."
     : "New radio traffic will appear here automatically.";
+  updateMobileFeedSwitcher();
 }
 
 function requestSearchRefresh() {
@@ -1027,6 +1124,8 @@ function clearRenderedTranscripts() {
   processedMessages.clear();
   Object.keys(unreadCounts).forEach((key) => delete unreadCounts[key]);
   Object.keys(autoScrollState).forEach((key) => delete autoScrollState[key]);
+  mobileFeedSelect.replaceChildren();
+  mobileFeedPosition.innerText = "0 / 0";
 }
 
 function nextAnimationFrame() {
@@ -1298,7 +1397,7 @@ window.clearDateTimeFilter = function () {
   showToast("Date and time filter cleared");
 };
 
-window.exportCSV = function () {
+window.exportCSV = async function () {
   if (!currentProfile?.permissions?.export) {
     showToast("Supervisor clearance is required for exports.", "danger");
     return;
@@ -1306,8 +1405,36 @@ window.exportCSV = function () {
   const parameters = archiveQueryParameters();
   parameters.delete("include_suspect");
   parameters.delete("limit");
+  const exportButton = document.getElementById("export-csv");
+  exportButton.disabled = true;
+  exportButton.setAttribute("aria-busy", "true");
+  const countResponse = await fetch(`/api/export/count?${parameters}`, {
+    cache: "no-store",
+  });
+  if (!countResponse.ok) {
+    exportButton.disabled = false;
+    exportButton.removeAttribute("aria-busy");
+    throw new Error("Could not count matching export rows.");
+  }
+  const { count, through_id: throughId } = await countResponse.json();
+  if (!count) {
+    exportButton.disabled = false;
+    exportButton.removeAttribute("aria-busy");
+    showToast("No matching transmissions to export.", "danger");
+    return;
+  }
+  const confirmed = window.confirm(
+    `Export ${count.toLocaleString()} matching transmission${count === 1 ? "" : "s"} as CSV?`,
+  );
+  exportButton.disabled = false;
+  exportButton.removeAttribute("aria-busy");
+  if (!confirmed) return;
+  parameters.set("through_id", String(throughId));
   window.location.assign(`/api/export.csv?${parameters}`);
-  showToast("Preparing complete archive export…", "success");
+  showToast(
+    `Preparing ${count.toLocaleString()} transmission${count === 1 ? "" : "s"}…`,
+    "success",
+  );
 };
 
 function processIncomingData(data, options = {}) {
@@ -1340,13 +1467,21 @@ function processIncomingData(data, options = {}) {
   }
 
   const colElement = document.getElementById(colId);
-  if (colElement.classList.contains("channel-user-hidden")) {
+  const mobileFeedOffscreen =
+    mobileViewport.matches &&
+    !colElement.classList.contains("mobile-feed-active");
+  if (
+    colElement.classList.contains("channel-user-hidden") ||
+    mobileFeedOffscreen ||
+    !autoScrollState[colId]
+  ) {
     unreadCounts[colId]++;
     const badge = document.getElementById(`badge-${colId}`);
     badge.innerText = unreadCounts[colId];
     badge.style.display = "inline-block";
     badge.style.transform = "scale(1.2)";
     setTimeout(() => (badge.style.transform = "scale(1)"), 150);
+    setFollowButtonState(colId);
   }
 
   if (!options.deferScroll && autoScrollState[colId] && insertedAtEnd) {
@@ -1603,7 +1738,20 @@ document.getElementById("clear-global-search").addEventListener("click", clearGl
 document.getElementById("new-keyword").addEventListener("keypress", addKeyword);
 document.getElementById("apply-date-filter").addEventListener("click", applyDateTimeFilter);
 document.getElementById("clear-date-filter").addEventListener("click", clearDateTimeFilter);
-document.getElementById("export-csv").addEventListener("click", exportCSV);
+document.getElementById("export-csv").addEventListener("click", () => {
+  exportCSV().catch((error) => {
+    const exportButton = document.getElementById("export-csv");
+    exportButton.disabled = false;
+    exportButton.removeAttribute("aria-busy");
+    showToast(error.message, "danger");
+  });
+});
+mobileFeedSelect.addEventListener("change", (event) =>
+  setActiveMobileFeed(event.target.value, true),
+);
+mobileFeedPrevious.addEventListener("click", () => stepMobileFeed(-1));
+mobileFeedNext.addEventListener("click", () => stepMobileFeed(1));
+mobileViewport.addEventListener("change", updateMobileFeedSwitcher);
 document.getElementById("suspect-toggle").addEventListener("change", async (event) => {
   const toggle = event.target;
   const previousValue = showSuspectTranscripts;
@@ -1686,7 +1834,7 @@ function handleFeedScroll(container) {
     const button = document.querySelector(
       `[data-action="toggle-auto-scroll"][data-column-id="${CSS.escape(columnId)}"]`,
     );
-    button?.classList.remove("active");
+    setFollowButtonState(columnId, button);
   }
   if (container.scrollTop <= 80) loadOlderArchive(container);
 }
@@ -1722,8 +1870,6 @@ document.addEventListener("click", (event) => {
     toggleAutoScroll(control.dataset.columnId, control);
   } else if (action === "toggle-play") {
     togglePlay(control);
-  } else if (action === "toggle-card-audio") {
-    toggleCardAudio(control);
   } else if (action === "seek-audio") {
     seekAudio(event, control);
   } else if (

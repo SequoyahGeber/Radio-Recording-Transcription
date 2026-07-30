@@ -17,3 +17,9 @@ if "$PYTHON_BIN" -c "import fastapi, httpx" 2>/dev/null; then
 else
     echo "API integration test skipped (FastAPI is not installed in this interpreter)."
 fi
+
+if [ "${RADIO_SKIP_BROWSER_TESTS:-0}" = "1" ]; then
+    echo "Browser regression tests skipped by RADIO_SKIP_BROWSER_TESTS=1."
+else
+    scripts/run_browser_tests.command
+fi

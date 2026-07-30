@@ -1,4 +1,6 @@
 import base64
+import csv
+import io
 import os
 import secrets
 import sys
@@ -400,6 +402,98 @@ class ApiIntegrationTests(unittest.TestCase):
             )
         finally:
             with connect() as connection:
+                connection.executemany(
+                    "DELETE FROM transcripts WHERE filename = ?",
+                    [(filename,) for filename in filenames],
+                )
+                connection.commit()
+
+    def test_export_streams_every_matching_row_without_legacy_cap(self):
+        row_count = 2105
+        filenames = [
+            f"FullExport/full-export-{index:04d}.mp3"
+            for index in range(row_count)
+        ]
+        try:
+            with connect() as connection:
+                connection.executemany(
+                    """
+                    INSERT INTO transcripts(
+                        timestamp, recorded_at, filename, transcript_text,
+                        raw_transcript_text, quality_score, quality_reason, status
+                    ) VALUES (?, ?, ?, ?, ?, 1.0, '', 'ready')
+                    """,
+                    [
+                        (
+                            f"2026-07-22T{(index // 3600) % 24:02d}:"
+                            f"{(index // 60) % 60:02d}:{index % 60:02d}",
+                            f"2026-07-22T{(index // 3600) % 24:02d}:"
+                            f"{(index // 60) % 60:02d}:{index % 60:02d}",
+                            filename,
+                            f"full-export-marker transmission {index}",
+                            f"full-export-marker transmission {index}",
+                        )
+                        for index, filename in enumerate(filenames)
+                    ],
+                )
+                connection.commit()
+
+            count_response = self.client.get(
+                "/api/export/count",
+                params={"q": "full-export-marker"},
+            )
+            self.assertEqual(count_response.status_code, 200)
+            self.assertEqual(count_response.json()["count"], row_count)
+            export_high_watermark = count_response.json()["through_id"]
+
+            with connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO transcripts(
+                        timestamp, recorded_at, filename, transcript_text,
+                        raw_transcript_text, quality_score, quality_reason, status
+                    ) VALUES (?, ?, ?, ?, ?, 1.0, '', 'ready')
+                    """,
+                    (
+                        "2026-07-22T23:59:59",
+                        "2026-07-22T23:59:59",
+                        "FullExport/after-count.mp3",
+                        "full-export-marker arrived after count",
+                        "full-export-marker arrived after count",
+                    ),
+                )
+                connection.commit()
+
+            response = self.client.get(
+                "/api/export.csv",
+                params={
+                    "q": "full-export-marker",
+                    "through_id": export_high_watermark,
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                int(response.headers["X-Radio-Export-Count"]),
+                row_count,
+            )
+            self.assertEqual(
+                int(response.headers["X-Radio-Export-Through-Id"]),
+                export_high_watermark,
+            )
+            exported_rows = list(csv.reader(io.StringIO(response.text)))
+            self.assertEqual(len(exported_rows), row_count + 1)
+            self.assertEqual(exported_rows[0][0], "Recorded")
+            self.assertIn("transmission 0", exported_rows[1][2])
+            self.assertIn(
+                f"transmission {row_count - 1}",
+                exported_rows[-1][2],
+            )
+        finally:
+            with connect() as connection:
+                connection.execute(
+                    "DELETE FROM transcripts WHERE filename = ?",
+                    ("FullExport/after-count.mp3",),
+                )
                 connection.executemany(
                     "DELETE FROM transcripts WHERE filename = ?",
                     [(filename,) for filename in filenames],

@@ -13,7 +13,12 @@ from typing import List, Optional
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -381,16 +386,16 @@ def transcript_row_to_dict(row):
     }
 
 
-def query_transcripts(
+def transcript_filter(
     query="",
     after_id=None,
     before_id=None,
-    limit=500,
     date_value="",
     start_time="",
     end_time="",
     include_suspect=False,
     bookmarked=False,
+    through_id=None,
 ):
     clauses = ["status != 'blank'"]
     parameters = []
@@ -447,6 +452,35 @@ def query_transcripts(
             parameters.append(end_time)
     if bookmarked:
         clauses.append("bookmarked = 1")
+    if through_id is not None:
+        clauses.append("id <= ?")
+        parameters.append(through_id)
+    return " AND ".join(clauses), parameters
+
+
+def query_transcripts(
+    query="",
+    after_id=None,
+    before_id=None,
+    limit=500,
+    date_value="",
+    start_time="",
+    end_time="",
+    include_suspect=False,
+    bookmarked=False,
+    through_id=None,
+):
+    where_clause, parameters = transcript_filter(
+        query=query,
+        after_id=after_id,
+        before_id=before_id,
+        date_value=date_value,
+        start_time=start_time,
+        end_time=end_time,
+        include_suspect=include_suspect,
+        bookmarked=bookmarked,
+        through_id=through_id,
+    )
 
     order_by = (
         "id ASC"
@@ -460,7 +494,7 @@ def query_transcripts(
                notes, corrected_by, corrected_at, transcription_model,
                retry_status
         FROM transcripts
-        WHERE {' AND '.join(clauses)}
+        WHERE {where_clause}
         ORDER BY {order_by}
         LIMIT ?
     """
@@ -469,6 +503,80 @@ def query_transcripts(
     if after_id is None:
         rows = list(reversed(rows))
     return [transcript_row_to_dict(row) for row in rows]
+
+
+def export_query_parts(
+    query="",
+    date_value="",
+    start_time="",
+    end_time="",
+    bookmarked=False,
+    through_id=None,
+):
+    return transcript_filter(
+        query=query,
+        date_value=date_value,
+        start_time=start_time,
+        end_time=end_time,
+        include_suspect=True,
+        bookmarked=bookmarked,
+        through_id=through_id,
+    )
+
+
+def count_export_rows(**filters):
+    where_clause, parameters = export_query_parts(**filters)
+    with connect(read_only=True) as connection:
+        return connection.execute(
+            f"SELECT count(*) FROM transcripts WHERE {where_clause}",
+            parameters,
+        ).fetchone()[0]
+
+
+def stream_export_csv(**filters):
+    where_clause, parameters = export_query_parts(**filters)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "Recorded",
+            "Channel/File",
+            "Transcript",
+            "Status",
+            "Reviewed",
+            "Bookmarked",
+            "Notes",
+        ]
+    )
+    yield output.getvalue()
+
+    with connect(read_only=True) as connection:
+        cursor = connection.execute(
+            f"""
+            SELECT timestamp, recorded_at, filename, transcript_text,
+                   status, reviewed, bookmarked, notes
+            FROM transcripts
+            WHERE {where_clause}
+            ORDER BY coalesce(recorded_at, timestamp) ASC, id ASC
+            """,
+            parameters,
+        )
+        while rows := cursor.fetchmany(500):
+            output.seek(0)
+            output.truncate(0)
+            for row in rows:
+                writer.writerow(
+                    [
+                        row["recorded_at"] or row["timestamp"],
+                        row["filename"],
+                        row["transcript_text"] or "",
+                        row["status"],
+                        bool(row["reviewed"]),
+                        bool(row["bookmarked"]),
+                        row["notes"] or "",
+                    ]
+                )
+            yield output.getvalue()
 
 
 def read_log_tail(path, line_limit, byte_limit=512 * 1024):
@@ -725,41 +833,59 @@ def export_csv(
     start: str = "",
     end: str = "",
     bookmarked: bool = False,
+    through_id: Optional[int] = None,
 ):
     session = require_role(request, "supervisor")
-    rows = query_transcripts(
+    if through_id is None:
+        with connect(read_only=True) as connection:
+            through_id = connection.execute(
+                "SELECT coalesce(max(id), 0) FROM transcripts"
+            ).fetchone()[0]
+    filters = {
+        "query": q.strip(),
+        "date_value": date,
+        "start_time": start,
+        "end_time": end,
+        "bookmarked": bookmarked,
+        "through_id": through_id,
+    }
+    row_count = count_export_rows(**filters)
+    audit(session["u"], "export", details={"rows": row_count, "query": q})
+    filename = f"radio-transcripts-{datetime.now().strftime('%Y%m%d-%H%M%S')}.csv"
+    return StreamingResponse(
+        stream_export_csv(**filters),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Radio-Export-Count": str(row_count),
+            "X-Radio-Export-Through-Id": str(through_id),
+        },
+    )
+
+
+@app.get("/api/export/count")
+def export_count(
+    request: Request,
+    q: str = Query("", max_length=200),
+    date: str = "",
+    start: str = "",
+    end: str = "",
+    bookmarked: bool = False,
+):
+    require_role(request, "supervisor")
+    with connect(read_only=True) as connection:
+        through_id = connection.execute(
+            "SELECT coalesce(max(id), 0) FROM transcripts"
+        ).fetchone()[0]
+    row_count = count_export_rows(
         query=q.strip(),
-        limit=2000,
         date_value=date,
         start_time=start,
         end_time=end,
-        include_suspect=True,
         bookmarked=bookmarked,
+        through_id=through_id,
     )
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(
-        ["Recorded", "Channel/File", "Transcript", "Status", "Reviewed", "Bookmarked", "Notes"]
-    )
-    for row in rows:
-        writer.writerow(
-            [
-                row["recorded_at"] or row["timestamp"],
-                row["filename"],
-                row["transcript_text"],
-                row["status"],
-                row["reviewed"],
-                row["bookmarked"],
-                row["notes"],
-            ]
-        )
-    audit(session["u"], "export", details={"rows": len(rows), "query": q})
-    filename = f"radio-transcripts-{datetime.now().strftime('%Y%m%d-%H%M%S')}.csv"
-    return Response(
-        output.getvalue(),
-        media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+    return {"count": row_count, "through_id": through_id}
 
 
 @app.patch("/api/transcripts/{transcript_id}")

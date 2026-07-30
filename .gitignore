@@ -1,11 +1,14 @@
 # Local runtimes and caches
 venv/
 env/
+node_modules/
 .env
 .vscode/
 __pycache__/
 *.pyc
 .DS_Store
+playwright-report/
+test-results/
 
 # Private data, models, and generated security material
 data/

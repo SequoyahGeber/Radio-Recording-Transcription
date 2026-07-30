@@ -1,0 +1,11 @@
+{
+  "name": "radio-command-center",
+  "private": true,
+  "scripts": {
+    "test:browser": "playwright test",
+    "test:browser:headed": "playwright test --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1"
+  }
+}

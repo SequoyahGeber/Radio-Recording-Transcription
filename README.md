@@ -188,12 +188,45 @@ automatically; define an explicit archival policy for the deployment.
 
 ## Tests
 
-Run:
+Install the developer-only browser dependency once:
+
+```sh
+npm install
+```
+
+Then run the complete Python, API, and browser baseline:
 
 ```sh
 scripts/run_tests.command
 ```
 
-The suite covers schema migration, live-first ordering, verified copies, and
-garbage-transcript classification. Python, shell, JavaScript, and Swift syntax
-are also checked during release validation.
+The Python suite covers schema migration, live-first ordering, verified copies,
+garbage-transcript classification, access control, archive pagination,
+uncapped streaming export, model management, and updater safety. The Playwright
+suite starts an isolated HTTPS server, creates 176 disposable transmissions
+across eight realistic feeds, and checks authentication, archive rendering,
+search, overlay controls, the console, card actions, full export, mobile feed
+navigation, and feed geometry from 320 through 1,920 pixels in the installed
+stable Google Chrome.
+
+Run only the browser regression tests with:
+
+```sh
+scripts/run_browser_tests.command
+```
+
+Use `PLAYWRIGHT_HEADED=1 scripts/run_browser_tests.command` to watch the test,
+or set `PLAYWRIGHT_BROWSER_CHANNEL=chromium` after running
+`npx playwright install chromium` on a machine without Google Chrome. The
+fixture is generated under the system temporary directory and removed when the
+test server exits; it never reads or changes production recordings, accounts,
+settings, or databases.
+
+The responsive geometry matrix verifies 320, 390, 640, 700, 820, 1,040, 1,280,
+1,440, and 1,920 pixel viewports; 640 CSS pixels also exercises the effective
+layout of a 1,280-pixel window at 200% zoom. It asserts that feed rectangles
+never overlap, the page itself never scrolls horizontally, and mobile layouts
+expose exactly one feed through the feed navigator.
+
+Set `RADIO_SKIP_BROWSER_TESTS=1` only when running the Python/API subset in an
+environment that cannot launch a local HTTPS server.

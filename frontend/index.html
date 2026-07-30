@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Radio Command Center | Live Ops</title>
 
-    <link rel="stylesheet" href="/static/css/style.css?v=20260727-5" />
+    <link rel="stylesheet" href="/static/css/style.css?v=20260730-6" />
   </head>
   <body>
     <header id="topbar">
@@ -82,19 +82,64 @@
             type="button"
             aria-controls="console-panel"
             aria-expanded="false"
+            aria-label="Program console"
             hidden
           >
             <span class="button-icon console-icon" aria-hidden="true">&gt;_</span>
-            Console
+            <span class="topbar-action-label">Console</span>
             <span id="console-error-count" class="console-error-count" hidden>0</span>
           </button>
-          <button id="export-csv" class="btn btn-primary">Export CSV</button>
+          <button
+            id="export-csv"
+            class="btn btn-primary"
+            type="button"
+            aria-label="Export matching transmissions"
+          >
+            <span class="button-icon export-icon" aria-hidden="true">⇩</span>
+            <span class="topbar-action-label">Export CSV</span>
+          </button>
           <div class="account-menu">
             <div id="current-profile" class="current-profile">Loading profile…</div>
-            <button id="logout-button" class="btn btn-quiet">Sign out</button>
+            <button
+              id="logout-button"
+              class="btn btn-quiet"
+              type="button"
+              aria-label="Sign out"
+            >
+              <span class="button-icon signout-icon" aria-hidden="true">↪</span>
+              <span class="topbar-action-label">Sign out</span>
+            </button>
           </div>
         </div>
       </div>
+
+      <nav
+        id="mobile-feed-switcher"
+        class="mobile-feed-switcher"
+        aria-label="Mobile feed navigation"
+      >
+        <button
+          id="mobile-feed-previous"
+          class="mobile-feed-nav-button"
+          type="button"
+          aria-label="Previous feed"
+        >
+          ‹
+        </button>
+        <label class="mobile-feed-select-wrap">
+          <span>Active feed</span>
+          <select id="mobile-feed-select" aria-label="Active radio feed"></select>
+        </label>
+        <span id="mobile-feed-position" class="mobile-feed-position">—</span>
+        <button
+          id="mobile-feed-next"
+          class="mobile-feed-nav-button"
+          type="button"
+          aria-label="Next feed"
+        >
+          ›
+        </button>
+      </nav>
 
       <div id="control-deck" class="control-deck">
         <section class="control-card">
@@ -242,6 +287,6 @@
     </div>
     <div id="toast-container"></div>
 
-    <script src="/static/js/app.js?v=20260730-2"></script>
+    <script src="/static/js/app.js?v=20260730-3"></script>
   </body>
 </html>
