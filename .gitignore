@@ -2,16 +2,13 @@
 venv/
 env/
 .env
+.vscode/
 __pycache__/
 *.pyc
 .DS_Store
 
 # Private data, models, and generated security material
-data/recordings/*
-data/security/*
-data/logs/*
-data/runtime/*
-data/settings.json
+data/
 models/*
 dist/
 *.db

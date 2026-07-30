@@ -11,5 +11,5 @@ if [ ! -x "./venv/bin/python" ]; then
 fi
 
 echo "Starting Radio Command Center supervisor..."
-echo "Logs are stored in data/logs."
+echo "Logs are stored in ~/Library/Application Support/Radio Command Center/logs."
 exec ./venv/bin/python scripts/supervisor.py

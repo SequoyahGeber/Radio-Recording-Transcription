@@ -53,10 +53,18 @@ if [[ ! -d "$PYTHON_FRAMEWORK_SOURCE" || ! -d "$SITE_PACKAGES_SOURCE" ]]; then
     exit 1
 fi
 
-mkdir -p "$RUNTIME_DIR" "$PYTHON_RESOURCES_DIR"
+mkdir -p "$RUNTIME_DIR/scripts" "$PYTHON_RESOURCES_DIR"
 cp -R backend "$RUNTIME_DIR/backend"
 cp -R frontend "$RUNTIME_DIR/frontend"
-cp -R scripts "$RUNTIME_DIR/scripts"
+for runtime_script in \
+    app_updater.py \
+    replace_app.command \
+    service_control.py \
+    setup_security.py \
+    supervisor.py
+do
+    cp "scripts/$runtime_script" "$RUNTIME_DIR/scripts/$runtime_script"
+done
 cp -R models "$RUNTIME_DIR/models"
 cp -R "$SITE_PACKAGES_SOURCE" "$RUNTIME_DIR/site-packages"
 # mlx-whisper declares PyTorch for an optional conversion helper, but the app's
