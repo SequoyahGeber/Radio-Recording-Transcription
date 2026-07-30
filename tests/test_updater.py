@@ -1,6 +1,8 @@
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 from scripts.app_updater import (
     UpdateError,
@@ -10,6 +12,7 @@ from scripts.app_updater import (
     parse_version,
     path_within,
     release_status,
+    run_checked,
 )
 
 
@@ -61,6 +64,20 @@ class VersionTests(unittest.TestCase):
             release_status("1.3.0", release=sample_release("1.2.0"))["status"],
             "current",
         )
+
+
+class CommandOutputTests(unittest.TestCase):
+    def test_structured_stdout_is_not_polluted_by_hdiutil_warning(self):
+        with mock.patch(
+            "scripts.app_updater.subprocess.run",
+            return_value=SimpleNamespace(
+                stdout="<plist><dict/></plist>",
+                stderr="hdiutil: WARNING: deprecated",
+            ),
+        ):
+            output = run_checked(["hdiutil", "attach", "-plist", "release.dmg"])
+
+        self.assertEqual(output, "<plist><dict/></plist>")
 
 
 class ReleaseValidationTests(unittest.TestCase):

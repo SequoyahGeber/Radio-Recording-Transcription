@@ -190,15 +190,20 @@ def bundle_metadata(app_path):
 
 def run_checked(arguments):
     try:
-        return subprocess.run(
+        result = subprocess.run(
             arguments,
             check=True,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.PIPE,
             text=True,
-        ).stdout
+        )
+        return result.stdout
     except (OSError, subprocess.CalledProcessError) as exc:
-        output = getattr(exc, "stdout", "") or str(exc)
+        output = (
+            getattr(exc, "stdout", "")
+            or getattr(exc, "stderr", "")
+            or str(exc)
+        )
         raise UpdateError(output.strip() or f"Command failed: {arguments[0]}") from exc
 
 
