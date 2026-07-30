@@ -68,6 +68,10 @@ test("archive search and overlay controls work with populated data", async ({
   await expect(search).toBeEditable();
   await search.fill("missing child");
   await expect(page.locator("#search-status")).toContainText("result");
+  await expect(page.locator("#archive-search-view")).toBeVisible();
+  await expect(page.locator("#archive-search-summary")).toContainText(
+    "exact match",
+  );
   await expect(
     page.locator(".message-card:visible", { hasText: "missing child" }).first(),
   ).toBeVisible();
@@ -90,6 +94,68 @@ test("archive search and overlay controls work with populated data", async ({
   await expect(page.locator("#console-output")).toContainText(
     "Phase Zero fixture dashboard started",
   );
+});
+
+test("indexed search spans years, filters facets, paginates, and saves views", async ({
+  page,
+}) => {
+  await signIn(page);
+  const search = page.getByRole("searchbox", { name: "Search all feeds" });
+  await search.click();
+  await search.fill("gate");
+
+  const searchView = page.locator("#archive-search-view");
+  await expect(searchView).toBeVisible();
+  await expect(page.locator(".archive-result").first()).toBeVisible();
+  await expect(page.locator(".search-result-snippet mark").first()).toBeVisible();
+  await expect(page.locator("#archive-search-summary")).toContainText("ms");
+
+  const years = page.locator("#archive-search-year");
+  await expect(years.locator('option[value="2024"]')).toHaveCount(1);
+  await expect(years.locator('option[value="2025"]')).toHaveCount(1);
+  await expect(years.locator('option[value="2026"]')).toHaveCount(1);
+  await years.selectOption("2024");
+  await expect(page.locator("#archive-search-summary")).toContainText(
+    "exact match",
+  );
+  await expect(page.locator(".archive-result")).not.toHaveCount(0);
+  await expect(
+    page.locator(".archive-result-meta", { hasText: "2024" }).first(),
+  ).toBeVisible();
+
+  await years.selectOption("");
+  await page.locator("#archive-search-page-size").selectOption("25");
+  await search.fill("the");
+  const initialResultCount = await page.locator(".archive-result").count();
+  const moreButton = page.getByRole("button", { name: "Load more results" });
+  if (await moreButton.isVisible()) {
+    await moreButton.click();
+    await expect
+      .poll(() => page.locator(".archive-result").count())
+      .toBeGreaterThan(initialResultCount);
+  }
+
+  await search.fill('"missing child"');
+  await page.getByRole("button", { name: "Saved searches" }).click();
+  const savedSearchDialog = page.locator("#saved-search-dialog");
+  await savedSearchDialog
+    .getByLabel("Saved search name")
+    .fill("Missing Child Archive");
+  await savedSearchDialog
+    .getByRole("button", { name: "Save current search" })
+    .click();
+  await expect(
+    savedSearchDialog.getByText("Missing Child Archive", { exact: true }),
+  ).toBeVisible();
+
+  const archiveYears = await page.evaluate(async () => {
+    const response = await fetch("/api/archive/years");
+    return response.json();
+  });
+  expect(archiveYears.total).toBe(176);
+  expect(archiveYears.years.map((item) => item.year)).toEqual([
+    2024, 2025, 2026,
+  ]);
 });
 
 test("feed geometry is collision-free at every supported breakpoint", async ({

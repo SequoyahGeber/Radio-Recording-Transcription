@@ -18,6 +18,9 @@ else
     echo "API integration test skipped (FastAPI is not installed in this interpreter)."
 fi
 
+PYTHONPYCACHEPREFIX="${TMPDIR:-/tmp}/radio-command-center-tests" \
+    "$PYTHON_BIN" tests/search_benchmark.py
+
 if [ "${RADIO_SKIP_BROWSER_TESTS:-0}" = "1" ]; then
     echo "Browser regression tests skipped by RADIO_SKIP_BROWSER_TESTS=1."
 else

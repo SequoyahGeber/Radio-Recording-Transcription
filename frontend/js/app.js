@@ -1365,6 +1365,10 @@ function scheduleArchiveSearch() {
 
 window.filterAllFeeds = function (query) {
   globalSearchQuery = query.trim().toLowerCase();
+  if (window.phaseThreeSearch) {
+    window.phaseThreeSearch(query);
+    return;
+  }
   updateSearchResults();
   scheduleArchiveSearch();
 };
@@ -1373,6 +1377,11 @@ window.clearGlobalSearch = function () {
   const input = document.getElementById("global-search");
   input.value = "";
   globalSearchQuery = "";
+  if (window.phaseThreeClearSearch) {
+    window.phaseThreeClearSearch();
+    input.focus();
+    return;
+  }
   updateSearchResults();
   scheduleArchiveSearch();
   input.focus();

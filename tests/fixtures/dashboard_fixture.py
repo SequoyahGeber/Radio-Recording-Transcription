@@ -121,6 +121,10 @@ def create_fixture(root, transcript_count=176):
     for index in range(transcript_count):
         channel = CHANNELS[index % len(CHANNELS)]
         recorded_at = now - timedelta(seconds=(transcript_count - index) * 38)
+        if index < 12:
+            recorded_at = recorded_at.replace(year=2024)
+        elif index < 24:
+            recorded_at = recorded_at.replace(year=2025)
         completed_at = recorded_at + timedelta(seconds=7)
         message = MESSAGES[index % len(MESSAGES)]
         status = "suspect" if index % 29 == 0 else "ready"
@@ -153,6 +157,8 @@ def create_fixture(root, transcript_count=176):
             (
                 completed_at.isoformat(),
                 recorded_at.isoformat(),
+                recorded_at.year,
+                channel,
                 filename,
                 message,
                 message if not corrected else f"Uncorrected audio text: {message}",
@@ -191,7 +197,8 @@ def create_fixture(root, transcript_count=176):
         connection.executemany(
             """
             INSERT INTO transcripts(
-                timestamp, recorded_at, filename, transcript_text,
+                timestamp, recorded_at, recording_year, channel,
+                filename, transcript_text,
                 raw_transcript_text, quality_score, quality_reason,
                 quality_metrics, status, reviewed, review_state, reviewed_by,
                 reviewed_at, review_resolution, version, bookmarked, notes,
@@ -199,7 +206,7 @@ def create_fixture(root, transcript_count=176):
                 retry_transcript_text, retry_model, retry_quality_score,
                 retry_quality_reason, retry_quality_metrics, retry_status,
                 retry_attempted_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )

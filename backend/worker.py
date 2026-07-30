@@ -15,7 +15,12 @@ from faster_whisper import WhisperModel
 from faster_whisper.vad import VadOptions, get_speech_timestamps
 
 from backend.config import AUDIO_DIR, DB_NAME, MODEL_DIR, TLS_CA_CERT_PATH
-from backend.database import connect, initialize_database, update_heartbeat
+from backend.database import (
+    connect,
+    infer_channel,
+    initialize_database,
+    update_heartbeat,
+)
 from backend.model_manager import (
     PRIMARY_MLX_MODEL,
     RETRY_MLX_MODEL as LARGE_V3_MLX_MODEL,
@@ -511,19 +516,23 @@ def process_task(item):
                 else "Large V3 rescue retained for review; Medium result kept"
             )
         else:
+            recording_time = recorded_at_for_file(rel_path)
             with connect() as connection:
                 cursor = connection.execute(
                     """
                     INSERT OR IGNORE INTO transcripts (
-                        timestamp, recorded_at, filename, transcript_text,
+                        timestamp, recorded_at, recording_year, channel,
+                        filename, transcript_text,
                         raw_transcript_text, quality_score, quality_reason,
                         quality_metrics, status, broadcast_pending,
                         transcription_model
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         current_time,
-                        recorded_at_for_file(rel_path).isoformat(),
+                        recording_time.isoformat(),
+                        recording_time.year,
+                        infer_channel(rel_path),
                         rel_path,
                         full_transcript,
                         full_transcript,

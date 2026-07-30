@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Radio Command Center | Live Ops</title>
 
-    <link rel="stylesheet" href="/static/css/style.css?v=20260730-7" />
+    <link rel="stylesheet" href="/static/css/style.css?v=20260730-8" />
   </head>
   <body>
     <header id="topbar">
@@ -266,6 +266,111 @@
 
     <main id="dashboard" aria-label="Radio transcript feeds"></main>
 
+    <section
+      id="archive-search-view"
+      class="archive-search-view"
+      aria-labelledby="archive-search-heading"
+      hidden
+    >
+      <header class="archive-search-header">
+        <div>
+          <span class="drawer-eyebrow">Complete multi-year archive</span>
+          <h2 id="archive-search-heading">Search results</h2>
+          <div id="archive-search-summary" class="archive-search-summary">
+            Enter a term, phrase, or prefix.
+          </div>
+        </div>
+        <div class="archive-search-actions">
+          <button
+            id="saved-searches-button"
+            class="btn"
+            type="button"
+            aria-haspopup="dialog"
+          >Saved searches</button>
+          <button id="archive-search-close" class="btn btn-quiet" type="button">
+            Back to live board
+          </button>
+        </div>
+      </header>
+      <div class="archive-search-toolbar" aria-label="Archive search filters">
+        <label>
+          <span>Sort</span>
+          <select id="archive-search-sort">
+            <option value="relevance">Most relevant</option>
+            <option value="recent">Newest first</option>
+          </select>
+        </label>
+        <label>
+          <span>Channel</span>
+          <select id="archive-search-channel">
+            <option value="">All channels</option>
+          </select>
+        </label>
+        <label>
+          <span>Year</span>
+          <select id="archive-search-year">
+            <option value="">All years</option>
+          </select>
+        </label>
+        <label>
+          <span>Review</span>
+          <select id="archive-search-review-state">
+            <option value="">All review states</option>
+            <option value="unreviewed">Unreviewed</option>
+            <option value="in_review">In review</option>
+            <option value="confirmed">Confirmed</option>
+            <option value="corrected">Corrected</option>
+            <option value="dismissed">Dismissed</option>
+          </select>
+        </label>
+        <label>
+          <span>Status</span>
+          <select id="archive-search-status">
+            <option value="">Routine traffic</option>
+            <option value="ready">Ready</option>
+            <option value="suspect">Suspect only</option>
+          </select>
+        </label>
+        <label>
+          <span>Reviewer</span>
+          <select id="archive-search-reviewer">
+            <option value="">All reviewers</option>
+          </select>
+        </label>
+        <label>
+          <span>Model</span>
+          <select id="archive-search-model">
+            <option value="">All models</option>
+          </select>
+        </label>
+        <label>
+          <span>Rows</span>
+          <select id="archive-search-page-size">
+            <option value="25">25</option>
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+          </select>
+        </label>
+        <label class="archive-search-checkbox">
+          <input id="archive-search-bookmarked" type="checkbox" />
+          <span>Bookmarked only</span>
+        </label>
+        <button id="archive-search-clear-filters" class="btn btn-quiet" type="button">
+          Clear filters
+        </button>
+      </div>
+      <div
+        id="archive-search-results"
+        class="archive-search-results"
+        aria-live="polite"
+      ></div>
+      <div class="archive-search-pagination">
+        <button id="archive-search-more" class="btn" type="button" hidden>
+          Load more results
+        </button>
+      </div>
+    </section>
+
     <aside
       id="transmission-drawer"
       class="transmission-drawer"
@@ -492,6 +597,36 @@
       </div>
     </dialog>
 
+    <dialog id="saved-search-dialog" class="workspace-dialog">
+      <form method="dialog" class="dialog-shell">
+        <div class="dialog-header">
+          <div>
+            <span class="drawer-eyebrow">Server-backed filters</span>
+            <h2>Saved searches</h2>
+          </div>
+          <button
+            class="drawer-icon-button"
+            value="cancel"
+            aria-label="Close saved searches"
+          >×</button>
+        </div>
+        <div id="saved-search-list" class="workspace-list"></div>
+        <div class="workspace-save-form">
+          <label>
+            <span>Saved search name</span>
+            <input
+              id="saved-search-name"
+              maxlength="64"
+              placeholder="Example: Medical north gate"
+            />
+          </label>
+          <button id="save-current-search" class="btn btn-primary" type="button">
+            Save current search
+          </button>
+        </div>
+      </form>
+    </dialog>
+
     <section id="console-panel" class="console-panel" aria-label="Program console" hidden>
       <div class="console-header">
         <div>
@@ -533,7 +668,8 @@
     </div>
     <div id="toast-container"></div>
 
-    <script src="/static/js/app.js?v=20260730-4"></script>
-    <script src="/static/js/phase2.js?v=20260730-1"></script>
+    <script src="/static/js/app.js?v=20260730-5"></script>
+    <script src="/static/js/phase2.js?v=20260730-2"></script>
+    <script src="/static/js/phase3.js?v=20260730-1"></script>
   </body>
 </html>

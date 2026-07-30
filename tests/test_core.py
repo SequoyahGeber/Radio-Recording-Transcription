@@ -1,6 +1,7 @@
 import atexit
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -115,8 +116,94 @@ class DatabaseMigrationTests(unittest.TestCase):
                 "retry_transcript_text",
                 "retry_model",
                 "retry_status",
+                "recording_year",
+                "channel",
+                "review_state",
+                "version",
             }.issubset(columns)
         )
+        with connect(read_only=True) as connection:
+            fts_table = connection.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE type = 'table' AND name = 'transcripts_fts'
+                """
+            ).fetchone()
+        self.assertIsNotNone(fts_table)
+
+
+class MultiYearArchiveMigrationTests(unittest.TestCase):
+    def test_annual_databases_import_idempotently_with_backup_and_year_counts(self):
+        from backend import database
+
+        with tempfile.TemporaryDirectory() as root:
+            destination = os.path.join(root, "festival_radio_2026.db")
+            source = os.path.join(root, "festival_radio_2024.db")
+            source_connection = sqlite3.connect(source)
+            source_connection.execute(
+                """
+                CREATE TABLE transcripts(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    recorded_at TEXT,
+                    filename TEXT NOT NULL UNIQUE,
+                    transcript_text TEXT,
+                    notes TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'ready',
+                    reviewed INTEGER NOT NULL DEFAULT 0,
+                    bookmarked INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            source_connection.execute(
+                """
+                INSERT INTO transcripts(
+                    timestamp, recorded_at, filename, transcript_text
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    "2024-07-01T10:00:05",
+                    "2024-07-01T10:00:00",
+                    "Archive/2024-07-01-10-00-00-archive.mp3",
+                    "historical archive verification",
+                ),
+            )
+            source_connection.commit()
+            source_connection.close()
+
+            with mock.patch.object(database, "DB_NAME", destination):
+                database.initialize_database()
+                database.initialize_database()
+                with database.connect(read_only=True) as connection:
+                    rows = connection.execute(
+                        """
+                        SELECT recording_year, channel, count(*) AS count
+                        FROM transcripts
+                        GROUP BY recording_year, channel
+                        """
+                    ).fetchall()
+                    imports = connection.execute(
+                        "SELECT source_count, imported_count FROM archive_imports"
+                    ).fetchall()
+                    fts_count = connection.execute(
+                        """
+                        SELECT count(*) FROM transcripts_fts
+                        WHERE transcripts_fts MATCH 'historical'
+                        """
+                    ).fetchone()[0]
+
+            self.assertEqual(
+                [(row["recording_year"], row["channel"], row["count"]) for row in rows],
+                [(2024, "Archive", 1)],
+            )
+            self.assertEqual(
+                [(row["source_count"], row["imported_count"]) for row in imports],
+                [(1, 1)],
+            )
+            self.assertEqual(fts_count, 1)
+            self.assertTrue(
+                os.path.isfile(f"{destination}.pre-multiyear.bak")
+            )
 
 
 class SyncPriorityTests(unittest.TestCase):
@@ -151,6 +238,26 @@ class SyncPriorityTests(unittest.TestCase):
         self.assertEqual(
             [candidate[2] for candidate in candidates],
             list(reversed(filenames)),
+        )
+
+    def test_candidate_scan_accepts_multiple_years_and_generic_audio_names(self):
+        filenames = (
+            "2024-01-01-00-00-00-Archive.mp3",
+            "2025-01-01-00-00-00-Archive.wav",
+            "untimestamped-radio-clip.m4a",
+        )
+        for filename in filenames:
+            path = os.path.join(SOURCE_DIR, filename)
+            with open(path, "wb") as handle:
+                handle.write(b"audio")
+            old_time = datetime(2025, 1, 2).timestamp()
+            os.utime(path, (old_time, old_time))
+
+        candidates = sync.candidate_files()
+
+        self.assertEqual(
+            {candidate[2] for candidate in candidates},
+            set(filenames),
         )
 
     def test_timestamped_archive_scan_does_not_stat_every_network_file(self):

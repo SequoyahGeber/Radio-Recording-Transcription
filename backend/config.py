@@ -3,6 +3,7 @@ import os
 import shutil
 import sys
 import tempfile
+from glob import glob
 
 # Base paths
 BACKEND_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -89,19 +90,39 @@ RECORDING_SOURCE_DIR = os.path.abspath(
         SETTINGS.get("source_dir", "/Volumes/Active Recording"),
     )
 )
+RECORDINGS_DIR = os.path.join(DATA_DIR, "recordings")
+LEGACY_YEAR_AUDIO_DIR = os.path.join(RECORDINGS_DIR, RECORDING_YEAR)
+DEFAULT_AUDIO_DIR = (
+    LEGACY_YEAR_AUDIO_DIR
+    if os.path.isdir(LEGACY_YEAR_AUDIO_DIR)
+    else RECORDINGS_DIR
+)
 AUDIO_DIR = os.path.abspath(
     os.environ.get(
         "RADIO_AUDIO_DIR",
-        SETTINGS.get(
-            "audio_dir",
-            os.path.join(DATA_DIR, "recordings", RECORDING_YEAR),
-        ),
+        SETTINGS.get("audio_dir", DEFAULT_AUDIO_DIR),
     )
 )
+DATABASE_DIR = os.path.join(DATA_DIR, "databases")
+UNIFIED_DB_NAME = os.path.join(DATABASE_DIR, "festival_radio.db")
+
+
+def default_database_path():
+    if os.path.isfile(UNIFIED_DB_NAME):
+        return UNIFIED_DB_NAME
+    annual_databases = sorted(glob(os.path.join(DATABASE_DIR, "festival_radio_*.db")))
+    if annual_databases:
+        # Continue using the newest existing database in place. Database
+        # initialization imports any other annual archives without renaming or
+        # deleting their recoverable source files.
+        return annual_databases[-1]
+    return UNIFIED_DB_NAME
+
+
 DB_NAME = os.path.abspath(
     os.environ.get(
         "RADIO_DB_PATH",
-        os.path.join(DATA_DIR, "databases", f"festival_radio_{RECORDING_YEAR}.db"),
+        SETTINGS.get("database_path", default_database_path()),
     )
 )
 SECURITY_DIR = os.path.abspath(

@@ -11,7 +11,10 @@ them with Whisper, and presents a secure live operations dashboard.
 - Dashboard notifications use a durable SQLite outbox and retry after outages.
 - Browsers recover missed transmissions after reconnecting.
 - Worker, sync, mount, queue, delivery, and disk status appear in system health.
-- Search and date filters query the complete database, not just loaded cards.
+- Indexed FTS5 archive search spans every imported year with exact counts,
+  safe phrase/prefix syntax, highlighted context, facets, and relevance sorting.
+- Search preferences and named saved searches follow each signed-in operator
+  because they are retained server-side rather than in one browser.
 - Repetitive or low-confidence transcripts are quarantined for supervisor review.
 - Operators use a five-state review workflow, bookmarks, notes, immutable
   change history, and an eight-second undo window.
@@ -109,6 +112,14 @@ take precedence:
 
 Runtime data, recordings, databases, downloaded models, logs, settings, and credentials
 remain excluded from source control.
+
+Fresh installations use one unified `festival_radio.db` archive and recordings
+directory for every year. Existing installations continue to use their current
+paths. On first launch after this upgrade, annual `festival_radio_YYYY.db`
+archives beside the active database are imported without modifying or deleting
+the source files. The importer creates a `pre-multiyear.bak` recovery snapshot
+before the first merge and records each source size, modification time, source
+count, and imported count so repeated startups are idempotent and auditable.
 
 ## Transcription models
 
@@ -209,15 +220,23 @@ Then run the complete Python, API, and browser baseline:
 scripts/run_tests.command
 ```
 
-The Python suite covers schema migration, live-first ordering, verified copies,
-garbage-transcript classification, access control, archive pagination,
-uncapped streaming export, versioned review history, workspace visibility,
-model management, and updater safety. The Playwright suite starts an isolated
-HTTPS server, creates 176 disposable transmissions across eight realistic
-feeds, and checks authentication, archive rendering, search, overlay controls,
-the console, detail editing and undo, the global player, shortcuts, workspaces,
-full export, mobile feed navigation, and feed geometry from 320 through 1,920
-pixels in the installed stable Google Chrome.
+The Python suite covers multi-year schema/import migration, live-first ordering,
+verified copies, garbage-transcript classification, access control, archive
+pagination, uncapped streaming export, versioned review history, workspace
+visibility, model management, and updater safety. The API suite verifies FTS5
+phrases, prefixes, snippets, facets, exact year counts, cursors, reindexing,
+preferences, and saved-search authorization. The Playwright suite starts an
+isolated HTTPS server, creates 176 disposable transmissions across eight
+realistic feeds and three years, and checks authentication, indexed archive
+search, filtering, pagination, saved views, overlay controls, the console,
+detail editing and undo, the global player, shortcuts, workspaces, full export,
+mobile feed navigation, and feed geometry from 320 through 1,920 pixels in the
+installed stable Google Chrome.
+
+The same command runs a deterministic 100,000- and 500,000-row FTS5 benchmark.
+Its exact-count search must remain below a 200 ms p95 gate at both sizes.
+Override the ceiling only for diagnostic comparison with
+`RADIO_SEARCH_P95_LIMIT_MS`; do not raise it in routine validation.
 
 Run only the browser regression tests with:
 

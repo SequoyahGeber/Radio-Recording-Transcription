@@ -28,6 +28,12 @@ function phaseTwoAudioUrl(filename) {
 }
 
 function phaseTwoVisibleCards() {
+  const archiveResults = [
+    ...document.querySelectorAll(
+      "#archive-search-view:not([hidden]) .archive-result",
+    ),
+  ];
+  if (archiveResults.length) return archiveResults;
   return [...document.querySelectorAll(".message-card")].filter((card) => {
     const column = card.closest(".channel-column");
     return (
@@ -543,8 +549,9 @@ async function phaseTwoApplyWorkspace(workspace) {
     ? [...configuration.feed_order]
     : savedColumnOrder;
   const filters = configuration.filters || {};
-  globalSearchInput.value = filters.query || "";
-  globalSearchQuery = globalSearchInput.value.trim().toLowerCase();
+  const workspaceQuery = filters.query || "";
+  globalSearchInput.value = workspaceQuery;
+  globalSearchQuery = workspaceQuery.trim().toLowerCase();
   document.getElementById("filter-date").value = filters.date || "";
   document.getElementById("filter-start").value = filters.start || "";
   document.getElementById("filter-end").value = filters.end || "";
@@ -555,11 +562,17 @@ async function phaseTwoApplyWorkspace(workspace) {
   document.getElementById("bookmarks-only-toggle").checked = bookmarksOnly;
   compactModeToggle.checked = Boolean(configuration.compact);
   document.body.classList.toggle("compact-mode", compactModeToggle.checked);
+  const preservedQuery = globalSearchQuery;
+  globalSearchQuery = "";
   await loadArchive();
+  globalSearchQuery = preservedQuery;
   phaseTwoState.focusedFeed = "";
   phaseTwoFocusFeed(configuration.focused_feed || "");
   saveColumnPreferences();
   phaseTwoWorkspaceDialog.close();
+  if (workspaceQuery && window.phaseThreeSearch) {
+    window.phaseThreeSearch(workspaceQuery, true);
+  }
   showToast(`Workspace applied: ${workspace.name}`, "success");
 }
 

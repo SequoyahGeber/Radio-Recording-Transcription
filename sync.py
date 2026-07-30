@@ -4,7 +4,7 @@ import shutil
 import time
 from datetime import datetime
 
-from backend.config import AUDIO_DIR, RECORDING_SOURCE_DIR, RECORDING_YEAR
+from backend.config import AUDIO_DIR, RECORDING_SOURCE_DIR
 from backend.database import connect, initialize_database, update_heartbeat
 
 
@@ -32,12 +32,11 @@ def recorded_at(filename, source_stat=None):
 
 
 def candidate_files():
-    prefix = f"{RECORDING_YEAR}-"
     now = datetime.now()
     candidates = []
     for root, _, files in os.walk(RECORDING_SOURCE_DIR):
         for filename in files:
-            if not filename.lower().endswith(AUDIO_EXTENSIONS) or not filename.startswith(prefix):
+            if not filename.lower().endswith(AUDIO_EXTENSIONS):
                 continue
             source_path = os.path.join(root, filename)
             relative_path = os.path.relpath(source_path, RECORDING_SOURCE_DIR)

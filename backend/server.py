@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import threading
 import time
 import zlib
@@ -46,6 +47,7 @@ from backend.security import (
     validate_session_token,
     verify_internal_token,
 )
+from backend.search import search_transcripts
 from backend.transcript_quality import has_meaningful_transcript
 
 
@@ -159,6 +161,15 @@ class WorkspacePayload(BaseModel):
     is_shared: bool = False
 
 
+class PreferencesPayload(BaseModel):
+    configuration: dict
+
+
+class SavedSearchPayload(BaseModel):
+    name: str
+    configuration: dict
+
+
 class UserPayload(BaseModel):
     username: str
     display_name: str = ""
@@ -175,7 +186,8 @@ REVIEW_STATES = {
     "dismissed",
 }
 TRANSCRIPT_DETAIL_COLUMNS = """
-    id, timestamp, recorded_at, filename, transcript_text,
+    id, timestamp, recorded_at, recording_year, channel, filename,
+    transcript_text,
     raw_transcript_text, quality_score, quality_reason, quality_metrics,
     status, reviewed, review_state, reviewed_by, reviewed_at,
     review_resolution, version, bookmarked, notes, corrected_by,
@@ -192,6 +204,13 @@ WORKSPACE_ALLOWED_KEYS = {
     "compact",
     "alerts_visible",
 }
+PREFERENCE_ALLOWED_KEYS = {
+    "search_sort",
+    "search_page_size",
+    "default_search_filters",
+    "last_workspace_id",
+}
+SAVED_SEARCH_ALLOWED_KEYS = {"query", "filters", "sort"}
 
 
 def secure_headers(response):
@@ -413,6 +432,10 @@ def transcript_row_to_dict(row):
         "id": row["id"],
         "timestamp": row["timestamp"],
         "recorded_at": row["recorded_at"],
+        "recording_year": (
+            row["recording_year"] if "recording_year" in row_keys else None
+        ),
+        "channel": row["channel"] if "channel" in row_keys else None,
         "filename": row["filename"],
         "transcript_text": row["transcript_text"] or "",
         "quality_score": row["quality_score"],
@@ -447,6 +470,10 @@ def transcript_row_to_dict(row):
     ):
         if column in row_keys:
             payload[column] = row[column]
+    if "snippet" in row_keys:
+        payload["snippet"] = row["snippet"] or ""
+    if "rank_score" in row_keys:
+        payload["rank_score"] = row["rank_score"]
     return payload
 
 
@@ -553,7 +580,8 @@ def query_transcripts(
     )
     parameters.append(max(1, min(limit, 2000)))
     sql = f"""
-        SELECT id, timestamp, recorded_at, filename, transcript_text,
+        SELECT id, timestamp, recorded_at, recording_year, channel,
+               filename, transcript_text,
                quality_score, quality_reason, status, reviewed, bookmarked,
                notes, corrected_by, corrected_at, transcription_model,
                retry_status, review_state, reviewed_by, reviewed_at,
@@ -890,6 +918,162 @@ def get_history(
     )
 
 
+@app.get("/api/search")
+def search_archive(
+    request: Request,
+    q: str = Query(..., min_length=1, max_length=300),
+    cursor: str = Query("", max_length=500),
+    limit: int = 50,
+    sort: str = "relevance",
+    channel: str = Query("", max_length=160),
+    year: Optional[int] = None,
+    date_from: str = "",
+    date_to: str = "",
+    start: str = "",
+    end: str = "",
+    status: str = "",
+    review_state: str = "",
+    reviewer: str = Query("", max_length=80),
+    bookmarked: Optional[bool] = None,
+    model: str = Query("", max_length=200),
+):
+    session = require_role(request, "viewer")
+    include_suspect = status == "suspect" and role_allows(session, "supervisor")
+    try:
+        with connect(read_only=True) as connection:
+            result = search_transcripts(
+                connection,
+                query=q,
+                cursor=cursor,
+                limit=limit,
+                sort=sort,
+                channel=channel.strip(),
+                year=year,
+                date_from=date_from,
+                date_to=date_to,
+                start_time=start,
+                end_time=end,
+                status=status,
+                review_state=review_state,
+                reviewer=reviewer.strip(),
+                bookmarked=bookmarked,
+                model=model.strip(),
+                include_suspect=include_suspect,
+            )
+    except (ValueError, sqlite3.OperationalError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "items": [transcript_row_to_dict(row) for row in result["rows"]],
+        "count": result["count"],
+        "next_cursor": result["next_cursor"],
+        "elapsed_ms": result["elapsed_ms"],
+        "parsed_query": result["parsed_query"],
+        "sort": result["sort"],
+    }
+
+
+@app.get("/api/archive/facets")
+def archive_facets(request: Request):
+    session = require_role(request, "viewer")
+    routine_status = (
+        "status != 'blank'"
+        if role_allows(session, "supervisor")
+        else "status = 'ready'"
+    )
+    with connect(read_only=True) as connection:
+        channels = connection.execute(
+            f"""
+            SELECT channel AS value, count(*) AS count
+            FROM transcripts
+            WHERE {routine_status} AND channel IS NOT NULL AND channel != ''
+            GROUP BY channel
+            ORDER BY lower(channel)
+            """
+        ).fetchall()
+        years = connection.execute(
+            f"""
+            SELECT recording_year AS value, count(*) AS count
+            FROM transcripts
+            WHERE {routine_status} AND recording_year IS NOT NULL
+            GROUP BY recording_year
+            ORDER BY recording_year DESC
+            """
+        ).fetchall()
+        models = connection.execute(
+            f"""
+            SELECT transcription_model AS value, count(*) AS count
+            FROM transcripts
+            WHERE {routine_status}
+              AND transcription_model IS NOT NULL
+              AND transcription_model != ''
+            GROUP BY transcription_model
+            ORDER BY lower(transcription_model)
+            """
+        ).fetchall()
+        reviewers = connection.execute(
+            f"""
+            SELECT reviewed_by AS value, count(*) AS count
+            FROM transcripts
+            WHERE {routine_status}
+              AND reviewed_by IS NOT NULL
+              AND reviewed_by != ''
+            GROUP BY reviewed_by
+            ORDER BY lower(reviewed_by)
+            """
+        ).fetchall()
+        total = connection.execute(
+            f"SELECT count(*) FROM transcripts WHERE {routine_status}"
+        ).fetchone()[0]
+    facet_payload = lambda rows: [
+        {"value": row["value"], "count": row["count"]} for row in rows
+    ]
+    return {
+        "total": total,
+        "channels": facet_payload(channels),
+        "years": facet_payload(years),
+        "models": facet_payload(models),
+        "reviewers": facet_payload(reviewers),
+    }
+
+
+@app.get("/api/archive/years")
+def archive_years(request: Request):
+    require_role(request, "viewer")
+    with connect(read_only=True) as connection:
+        rows = connection.execute(
+            """
+            SELECT recording_year AS year,
+                   count(*) AS transcript_count,
+                   min(coalesce(recorded_at, timestamp)) AS first_recording,
+                   max(coalesce(recorded_at, timestamp)) AS last_recording
+            FROM transcripts
+            WHERE status != 'blank' AND recording_year IS NOT NULL
+            GROUP BY recording_year
+            ORDER BY recording_year
+            """
+        ).fetchall()
+        imports = connection.execute(
+            """
+            SELECT source_count, imported_count, imported_at
+            FROM archive_imports
+            ORDER BY imported_at
+            """
+        ).fetchall()
+    years = [dict(row) for row in rows]
+    return {
+        "years": years,
+        "total": sum(row["transcript_count"] for row in years),
+        "imports": [
+            {
+                "source_count": row["source_count"],
+                "imported_count": row["imported_count"],
+                "imported_at": row["imported_at"],
+            }
+            for row in imports
+        ],
+    }
+
+
 @app.get("/api/export.csv")
 def export_csv(
     request: Request,
@@ -1221,6 +1405,153 @@ def delete_workspace(workspace_id: int, request: Request):
         connection.execute("DELETE FROM saved_workspaces WHERE id = ?", (workspace_id,))
         connection.commit()
     audit(session["u"], "delete_workspace", details={"workspace_id": workspace_id})
+    return {"ok": True}
+
+
+def validate_configuration(configuration, allowed_keys, label, max_bytes=50_000):
+    unknown_keys = set(configuration) - allowed_keys
+    if unknown_keys:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported {label} settings: {', '.join(sorted(unknown_keys))}",
+        )
+    encoded = json.dumps(configuration, separators=(",", ":"), sort_keys=True)
+    if len(encoded.encode("utf-8")) > max_bytes:
+        raise HTTPException(status_code=400, detail=f"{label.title()} configuration is too large")
+    return encoded
+
+
+@app.get("/api/preferences")
+def get_preferences(request: Request):
+    session = require_role(request, "viewer")
+    with connect(read_only=True) as connection:
+        row = connection.execute(
+            """
+            SELECT configuration, updated_at
+            FROM user_preferences
+            WHERE username = ?
+            """,
+            (session["u"],),
+        ).fetchone()
+    return {
+        "configuration": json.loads(row["configuration"]) if row else {},
+        "updated_at": row["updated_at"] if row else None,
+    }
+
+
+@app.put("/api/preferences")
+def save_preferences(payload: PreferencesPayload, request: Request):
+    session = require_role(request, "viewer")
+    configuration = validate_configuration(
+        payload.configuration,
+        PREFERENCE_ALLOWED_KEYS,
+        "preference",
+    )
+    now = datetime.now().isoformat()
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO user_preferences(username, configuration, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(username) DO UPDATE SET
+                configuration = excluded.configuration,
+                updated_at = excluded.updated_at
+            """,
+            (session["u"], configuration, now),
+        )
+        connection.commit()
+    return {"configuration": json.loads(configuration), "updated_at": now}
+
+
+def saved_search_row_to_dict(row):
+    return {
+        "id": row["id"],
+        "owner_username": row["owner_username"],
+        "name": row["name"],
+        "configuration": json.loads(row["configuration"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+@app.get("/api/saved-searches")
+def get_saved_searches(request: Request):
+    session = require_role(request, "viewer")
+    with connect(read_only=True) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, owner_username, name, configuration, created_at, updated_at
+            FROM saved_searches
+            WHERE owner_username = ?
+            ORDER BY lower(name), id
+            """,
+            (session["u"],),
+        ).fetchall()
+    return [saved_search_row_to_dict(row) for row in rows]
+
+
+@app.post("/api/saved-searches")
+def save_search(payload: SavedSearchPayload, request: Request):
+    session = require_role(request, "viewer")
+    name = payload.name.strip()
+    if not 1 <= len(name) <= 64:
+        raise HTTPException(status_code=400, detail="Saved search name must be 1–64 characters")
+    configuration = validate_configuration(
+        payload.configuration,
+        SAVED_SEARCH_ALLOWED_KEYS,
+        "saved search",
+    )
+    parsed_configuration = json.loads(configuration)
+    query = str(parsed_configuration.get("query", "")).strip()
+    if not 1 <= len(query) <= 300:
+        raise HTTPException(status_code=400, detail="Saved search requires a query")
+    if parsed_configuration.get("sort", "relevance") not in {"relevance", "recent"}:
+        raise HTTPException(status_code=400, detail="Invalid saved search sort")
+    if not isinstance(parsed_configuration.get("filters", {}), dict):
+        raise HTTPException(status_code=400, detail="Saved search filters must be an object")
+    now = datetime.now().isoformat()
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO saved_searches(
+                owner_username, name, configuration, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(owner_username, name) DO UPDATE SET
+                configuration = excluded.configuration,
+                updated_at = excluded.updated_at
+            """,
+            (session["u"], name, configuration, now, now),
+        )
+        row = connection.execute(
+            """
+            SELECT id, owner_username, name, configuration, created_at, updated_at
+            FROM saved_searches
+            WHERE owner_username = ? AND name = ?
+            """,
+            (session["u"], name),
+        ).fetchone()
+        connection.commit()
+    return saved_search_row_to_dict(row)
+
+
+@app.delete("/api/saved-searches/{search_id}")
+def delete_saved_search(search_id: int, request: Request):
+    session = require_role(request, "viewer")
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT owner_username
+            FROM saved_searches
+            WHERE id = ?
+            """,
+            (search_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Saved search not found")
+        if row["owner_username"] != session["u"]:
+            raise HTTPException(status_code=403, detail="Only the owner can delete this saved search")
+        connection.execute("DELETE FROM saved_searches WHERE id = ?", (search_id,))
+        connection.commit()
     return {"ok": True}
 
 

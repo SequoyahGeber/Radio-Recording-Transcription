@@ -308,6 +308,190 @@ class ApiIntegrationTests(unittest.TestCase):
                 )
                 connection.commit()
 
+    def test_phase_three_fts_search_filters_snippets_and_cursor(self):
+        rows = (
+            (
+                "2024-06-01T10:00:05",
+                "2024-06-01T10:00:00",
+                2024,
+                "Medical",
+                "Medical/2024-06-01-10-00-00-medical.mp3",
+                "medical response alpha at the north gate",
+                "mlx-community/whisper-medium-mlx",
+            ),
+            (
+                "2025-06-01T11:00:05",
+                "2025-06-01T11:00:00",
+                2025,
+                "Security",
+                "Security/2025-06-01-11-00-00-security.mp3",
+                "security perimeter bravo at the south gate",
+                "mlx-community/whisper-large-v3-mlx",
+            ),
+            (
+                "2026-06-01T12:00:05",
+                "2026-06-01T12:00:00",
+                2026,
+                "Medical",
+                "Medical/2026-06-01-12-00-00-medical.mp3",
+                "medical response alpha at the east gate",
+                "mlx-community/whisper-medium-mlx",
+            ),
+        )
+        with connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO transcripts(
+                    timestamp, recorded_at, recording_year, channel,
+                    filename, transcript_text, raw_transcript_text,
+                    quality_score, quality_reason, status, transcription_model
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1.0, '', 'ready', ?)
+                """,
+                [(*row[:6], row[5], row[6]) for row in rows],
+            )
+            connection.commit()
+        try:
+            phrase = self.client.get(
+                "/api/search",
+                params={"q": '"north gate"', "channel": "Medical"},
+            )
+            self.assertEqual(phrase.status_code, 200)
+            self.assertEqual(phrase.json()["count"], 1)
+            self.assertIn("⟦north gate⟧", phrase.json()["items"][0]["snippet"])
+
+            prefix = self.client.get(
+                "/api/search",
+                params={"q": "medic*", "channel": "Medical"},
+            )
+            self.assertEqual(prefix.status_code, 200)
+            self.assertEqual(prefix.json()["count"], 2)
+
+            filtered = self.client.get(
+                "/api/search",
+                params={
+                    "q": "medical",
+                    "year": 2024,
+                    "model": "mlx-community/whisper-medium-mlx",
+                },
+            )
+            self.assertEqual(filtered.status_code, 200)
+            self.assertEqual(filtered.json()["count"], 1)
+            self.assertEqual(filtered.json()["items"][0]["recording_year"], 2024)
+
+            first_page = self.client.get(
+                "/api/search",
+                params={"q": "medical", "sort": "recent", "limit": 1},
+            ).json()
+            self.assertEqual(len(first_page["items"]), 1)
+            self.assertIsNotNone(first_page["next_cursor"])
+            second_page = self.client.get(
+                "/api/search",
+                params={
+                    "q": "medical",
+                    "sort": "recent",
+                    "limit": 1,
+                    "cursor": first_page["next_cursor"],
+                },
+            )
+            self.assertEqual(second_page.status_code, 200)
+            self.assertNotEqual(
+                first_page["items"][0]["id"],
+                second_page.json()["items"][0]["id"],
+            )
+            self.assertEqual(
+                self.client.get(
+                    "/api/search",
+                    params={"q": "medical", "cursor": "invalid"},
+                ).status_code,
+                400,
+            )
+
+            target = filtered.json()["items"][0]
+            note_update = self.client.patch(
+                f"/api/transcripts/{target['id']}",
+                json={
+                    "notes": "handoff beacon phase three",
+                    "version": target["version"],
+                },
+            )
+            self.assertEqual(note_update.status_code, 200)
+            notes_search = self.client.get(
+                "/api/search",
+                params={"q": '"handoff beacon"'},
+            )
+            self.assertEqual(notes_search.status_code, 200)
+            self.assertEqual(notes_search.json()["count"], 1)
+
+            years = self.client.get("/api/archive/years")
+            self.assertEqual(years.status_code, 200)
+            year_values = {item["year"] for item in years.json()["years"]}
+            self.assertTrue({2024, 2025, 2026}.issubset(year_values))
+            facets = self.client.get("/api/archive/facets").json()
+            self.assertIn("Medical", {item["value"] for item in facets["channels"]})
+        finally:
+            with connect() as connection:
+                connection.executemany(
+                    "DELETE FROM transcripts WHERE filename = ?",
+                    [(row[4],) for row in rows],
+                )
+                connection.commit()
+
+    def test_phase_three_preferences_and_saved_searches_are_server_backed(self):
+        search_name = "Medical North Gate"
+        configuration = {
+            "query": '"north gate"',
+            "filters": {"channel": "Medical", "year": 2024},
+            "sort": "relevance",
+        }
+        try:
+            preferences = self.client.put(
+                "/api/preferences",
+                json={
+                    "configuration": {
+                        "search_sort": "recent",
+                        "search_page_size": 25,
+                        "default_search_filters": {"channel": "Medical"},
+                    }
+                },
+            )
+            self.assertEqual(preferences.status_code, 200)
+            loaded_preferences = self.client.get("/api/preferences")
+            self.assertEqual(
+                loaded_preferences.json()["configuration"]["search_sort"],
+                "recent",
+            )
+            self.assertEqual(
+                self.client.put(
+                    "/api/preferences",
+                    json={"configuration": {"unsupported": True}},
+                ).status_code,
+                400,
+            )
+
+            saved = self.client.post(
+                "/api/saved-searches",
+                json={"name": search_name, "configuration": configuration},
+            )
+            self.assertEqual(saved.status_code, 200)
+            listed = self.client.get("/api/saved-searches")
+            self.assertIn(search_name, [item["name"] for item in listed.json()])
+            self.assertEqual(
+                self.client.delete(
+                    f"/api/saved-searches/{saved.json()['id']}"
+                ).status_code,
+                200,
+            )
+        finally:
+            with connect() as connection:
+                connection.execute(
+                    "DELETE FROM saved_searches WHERE name = ?",
+                    (search_name,),
+                )
+                connection.execute(
+                    "DELETE FROM user_preferences WHERE username = 'admin'"
+                )
+                connection.commit()
+
     def test_operator_has_dashboard_access_without_admin_console(self):
         create_response = self.client.post(
             "/api/users",
