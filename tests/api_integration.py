@@ -266,6 +266,10 @@ class ApiIntegrationTests(unittest.TestCase):
             self.assertEqual(recent.status_code, 200)
             recent_rows = recent.json()
             self.assertEqual(len(recent_rows), 100)
+            self.assertGreaterEqual(
+                int(recent.headers["X-Radio-High-Watermark"]),
+                max(row["id"] for row in recent_rows),
+            )
 
             older = self.client.get(
                 "/api/history",

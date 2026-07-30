@@ -1114,6 +1114,12 @@ async function loadArchive(options = {}) {
     return;
   }
   if (!response.ok) throw new Error("Archive search unavailable");
+  const highWatermark = Number(
+    response.headers.get("X-Radio-High-Watermark") || 0,
+  );
+  if (Number.isFinite(highWatermark) && highWatermark > 0) {
+    lastSeenTranscriptId = Math.max(lastSeenTranscriptId, highWatermark);
+  }
   const receivedRows = await response.json();
   if (requestNumber !== archiveRequestNumber) return 0;
   const hasOlderPage =

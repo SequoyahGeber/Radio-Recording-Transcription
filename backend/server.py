@@ -696,7 +696,11 @@ def get_history(
             detail="Choose either newer or older archive pagination",
         )
     include_suspect = include_suspect and role_allows(session, "supervisor")
-    return query_transcripts(
+    with connect(read_only=True) as connection:
+        high_watermark = connection.execute(
+            "SELECT coalesce(max(id), 0) FROM transcripts"
+        ).fetchone()[0]
+    rows = query_transcripts(
         query=q.strip(),
         after_id=after_id,
         before_id=before_id,
@@ -706,6 +710,10 @@ def get_history(
         end_time=end,
         include_suspect=include_suspect,
         bookmarked=bookmarked,
+    )
+    return JSONResponse(
+        rows,
+        headers={"X-Radio-High-Watermark": str(high_watermark)},
     )
 
 
