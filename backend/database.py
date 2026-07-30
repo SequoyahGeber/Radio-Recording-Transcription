@@ -17,6 +17,11 @@ TRANSCRIPT_COLUMNS = {
     "broadcast_attempts": "INTEGER NOT NULL DEFAULT 0",
     "last_broadcast_error": "TEXT",
     "reviewed": "INTEGER NOT NULL DEFAULT 0",
+    "review_state": "TEXT NOT NULL DEFAULT 'unreviewed'",
+    "reviewed_by": "TEXT",
+    "reviewed_at": "TEXT",
+    "review_resolution": "TEXT NOT NULL DEFAULT ''",
+    "version": "INTEGER NOT NULL DEFAULT 1",
     "bookmarked": "INTEGER NOT NULL DEFAULT 0",
     "notes": "TEXT NOT NULL DEFAULT ''",
     "corrected_by": "TEXT",
@@ -116,6 +121,45 @@ def initialize_database():
                 sha256 TEXT,
                 synced_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS transcript_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                transcript_id INTEGER NOT NULL,
+                version INTEGER NOT NULL,
+                changed_at TEXT NOT NULL,
+                changed_by TEXT NOT NULL,
+                change_type TEXT NOT NULL,
+                before_json TEXT NOT NULL,
+                after_json TEXT NOT NULL,
+                FOREIGN KEY(transcript_id) REFERENCES transcripts(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_transcript_versions_transcript
+                ON transcript_versions(transcript_id, id DESC);
+
+            CREATE TABLE IF NOT EXISTS saved_workspaces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_username TEXT NOT NULL,
+                name TEXT NOT NULL,
+                configuration TEXT NOT NULL DEFAULT '{}',
+                is_shared INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(owner_username, name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_saved_workspaces_visibility
+                ON saved_workspaces(is_shared, owner_username, name);
+            """
+        )
+        connection.execute(
+            """
+            UPDATE transcripts
+            SET review_state = CASE
+                WHEN reviewed = 1 THEN 'confirmed'
+                ELSE 'unreviewed'
+            END
+            WHERE review_state IS NULL
+               OR review_state = ''
+               OR (reviewed = 1 AND review_state = 'unreviewed')
             """
         )
         connection.execute(

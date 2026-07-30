@@ -13,11 +13,20 @@ them with Whisper, and presents a secure live operations dashboard.
 - Worker, sync, mount, queue, delivery, and disk status appear in system health.
 - Search and date filters query the complete database, not just loaded cards.
 - Repetitive or low-confidence transcripts are quarantined for supervisor review.
-- Operators can review, bookmark, and annotate transmissions.
+- Operators use a five-state review workflow, bookmarks, notes, immutable
+  change history, and an eight-second undo window.
 - Supervisors can correct transcripts and export server-generated CSV files.
 - Viewer, operator, supervisor, and administrator clearance profiles are supported.
 - The dashboard uses a collapsible top command bar so feed columns use the full window.
 - The newest 100 transmissions load first; scrolling upward fetches older pages.
+- Selecting a transmission opens a detail drawer with model comparison,
+  quality/source metadata, review history, and proper note/correction editors.
+- One global audio player supplies seek, skip, speed, volume, mute, and
+  previous/next controls without creating an audio element for every card.
+- Per-user and supervisor-shared workspaces retain feed visibility/order,
+  focus mode, filters, density, and alert visibility in SQLite.
+- The `⌘K` command palette and keyboard shortcuts cover routine review,
+  bookmark, note, correction, feed, search, and audio actions.
 - Operators can inspect browser, server, transcription, and sync events in the dashboard console.
 - A native Mac launcher embeds the secure dashboard alongside service and folder controls.
 - Administrators can pause or resume transcription without stopping the dashboard or sync service.
@@ -202,12 +211,13 @@ scripts/run_tests.command
 
 The Python suite covers schema migration, live-first ordering, verified copies,
 garbage-transcript classification, access control, archive pagination,
-uncapped streaming export, model management, and updater safety. The Playwright
-suite starts an isolated HTTPS server, creates 176 disposable transmissions
-across eight realistic feeds, and checks authentication, archive rendering,
-search, overlay controls, the console, card actions, full export, mobile feed
-navigation, and feed geometry from 320 through 1,920 pixels in the installed
-stable Google Chrome.
+uncapped streaming export, versioned review history, workspace visibility,
+model management, and updater safety. The Playwright suite starts an isolated
+HTTPS server, creates 176 disposable transmissions across eight realistic
+feeds, and checks authentication, archive rendering, search, overlay controls,
+the console, detail editing and undo, the global player, shortcuts, workspaces,
+full export, mobile feed navigation, and feed geometry from 320 through 1,920
+pixels in the installed stable Google Chrome.
 
 Run only the browser regression tests with:
 

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Radio Command Center | Live Ops</title>
 
-    <link rel="stylesheet" href="/static/css/style.css?v=20260730-6" />
+    <link rel="stylesheet" href="/static/css/style.css?v=20260730-7" />
   </head>
   <body>
     <header id="topbar">
@@ -66,6 +66,26 @@
         </div>
 
         <div class="topbar-actions">
+          <button
+            id="workspace-button"
+            class="topbar-control-btn"
+            type="button"
+            aria-label="Saved workspaces"
+            aria-haspopup="dialog"
+          >
+            <span class="button-icon" aria-hidden="true">▦</span>
+            <span class="topbar-action-label">Workspaces</span>
+          </button>
+          <button
+            id="command-palette-button"
+            class="topbar-control-btn"
+            type="button"
+            aria-label="Open command palette"
+            aria-haspopup="dialog"
+          >
+            <span class="button-icon" aria-hidden="true">⌘</span>
+            <span class="topbar-action-label">Commands</span>
+          </button>
           <button
             id="sidebar-collapse-btn"
             class="topbar-control-btn"
@@ -246,6 +266,232 @@
 
     <main id="dashboard" aria-label="Radio transcript feeds"></main>
 
+    <aside
+      id="transmission-drawer"
+      class="transmission-drawer"
+      aria-labelledby="drawer-title"
+      aria-modal="true"
+      role="dialog"
+      hidden
+    >
+      <div class="drawer-header">
+        <div>
+          <span id="drawer-channel" class="drawer-eyebrow">Transmission</span>
+          <h2 id="drawer-title">Transmission details</h2>
+          <div id="drawer-recorded-at" class="drawer-subtitle"></div>
+        </div>
+        <button
+          id="drawer-close-button"
+          class="drawer-icon-button"
+          type="button"
+          aria-label="Close transmission details"
+        >×</button>
+      </div>
+      <div id="drawer-loading" class="drawer-loading">Loading transmission…</div>
+      <div id="drawer-content" class="drawer-content" hidden>
+        <section class="drawer-section drawer-primary-actions">
+          <button id="drawer-play-button" class="btn btn-primary" type="button">
+            Play recording
+          </button>
+          <button id="drawer-bookmark-button" class="btn" type="button">
+            Bookmark
+          </button>
+          <button id="drawer-copy-button" class="btn btn-quiet" type="button">
+            Copy transcript
+          </button>
+        </section>
+
+        <section class="drawer-section">
+          <div class="drawer-section-heading">
+            <h3>Review workflow</h3>
+            <span id="drawer-version" class="drawer-version"></span>
+          </div>
+          <div class="drawer-form-grid">
+            <label>
+              <span>Review state</span>
+              <select id="drawer-review-state">
+                <option value="unreviewed">Unreviewed</option>
+                <option value="in_review">In review</option>
+                <option value="confirmed">Confirmed</option>
+                <option value="corrected">Corrected</option>
+                <option value="dismissed">Dismissed as unusable</option>
+              </select>
+            </label>
+            <label>
+              <span>Resolution reason</span>
+              <input
+                id="drawer-review-resolution"
+                maxlength="1000"
+                placeholder="Optional outcome or reason"
+              />
+            </label>
+          </div>
+          <div id="drawer-review-meta" class="drawer-review-meta"></div>
+        </section>
+
+        <section class="drawer-section">
+          <h3>Transcript</h3>
+          <div id="drawer-transcript" class="drawer-transcript"></div>
+        </section>
+
+        <section id="drawer-comparison-section" class="drawer-section" hidden>
+          <h3>Model comparison</h3>
+          <div class="transcript-comparison">
+            <article>
+              <h4>Original Medium result</h4>
+              <div id="drawer-raw-transcript"></div>
+            </article>
+            <article>
+              <h4>Large V3 retry</h4>
+              <div id="drawer-retry-transcript"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="drawer-section">
+          <label class="drawer-editor-label" for="drawer-notes">
+            Operator notes
+          </label>
+          <textarea
+            id="drawer-notes"
+            rows="4"
+            maxlength="4000"
+            placeholder="Add operational context or handoff notes"
+          ></textarea>
+        </section>
+
+        <section id="drawer-correction-section" class="drawer-section" hidden>
+          <label class="drawer-editor-label" for="drawer-correction">
+            Corrected transcript
+          </label>
+          <textarea id="drawer-correction" rows="7"></textarea>
+        </section>
+
+        <section class="drawer-section drawer-save-row">
+          <span id="drawer-save-status" role="status"></span>
+          <button id="drawer-save-button" class="btn btn-primary" type="button">
+            Save changes
+          </button>
+        </section>
+
+        <details class="drawer-section drawer-history">
+          <summary>Change history</summary>
+          <div id="drawer-history-list"></div>
+        </details>
+
+        <section class="drawer-section drawer-file-metadata">
+          <h3>Source metadata</h3>
+          <dl id="drawer-metadata"></dl>
+        </section>
+      </div>
+    </aside>
+    <button
+      id="drawer-scrim"
+      class="drawer-scrim"
+      type="button"
+      aria-label="Close transmission details"
+      hidden
+    ></button>
+
+    <section
+      id="global-player"
+      class="global-player"
+      aria-label="Recording player"
+      hidden
+    >
+      <audio id="global-audio" preload="metadata"></audio>
+      <div class="player-identification">
+        <strong id="player-channel">No recording selected</strong>
+        <span id="player-title">Choose a transmission to begin</span>
+      </div>
+      <div class="player-transport">
+        <button id="player-previous" type="button" aria-label="Previous transmission">‹</button>
+        <button id="player-back" type="button" aria-label="Skip back 5 seconds">−5</button>
+        <button id="player-toggle" class="player-toggle" type="button" aria-label="Play recording">▶</button>
+        <button id="player-forward" type="button" aria-label="Skip forward 5 seconds">+5</button>
+        <button id="player-next" type="button" aria-label="Next transmission">›</button>
+      </div>
+      <div class="player-timeline">
+        <input
+          id="player-progress"
+          class="player-progress"
+          type="range"
+          min="0"
+          max="1000"
+          value="0"
+          aria-label="Recording position"
+        />
+        <div class="player-time">
+          <span id="player-current-time">0:00</span>
+          <span id="player-duration">0:00</span>
+        </div>
+      </div>
+      <label class="player-setting">
+        <span>Speed</span>
+        <select id="player-speed" aria-label="Playback speed">
+          <option value="0.75">0.75×</option>
+          <option value="1" selected>1×</option>
+          <option value="1.25">1.25×</option>
+          <option value="1.5">1.5×</option>
+          <option value="2">2×</option>
+        </select>
+      </label>
+      <label class="player-volume">
+        <button id="player-mute" type="button" aria-label="Mute recording">◖</button>
+        <input
+          id="player-volume"
+          type="range"
+          min="0"
+          max="1"
+          step="0.05"
+          value="1"
+          aria-label="Recording volume"
+        />
+      </label>
+      <button id="player-close" class="player-close" type="button" aria-label="Close recording player">×</button>
+    </section>
+
+    <dialog id="workspace-dialog" class="workspace-dialog">
+      <form method="dialog" class="dialog-shell">
+        <div class="dialog-header">
+          <div>
+            <span class="drawer-eyebrow">Operator layouts</span>
+            <h2>Saved workspaces</h2>
+          </div>
+          <button class="drawer-icon-button" value="cancel" aria-label="Close saved workspaces">×</button>
+        </div>
+        <div id="workspace-list" class="workspace-list"></div>
+        <div class="workspace-save-form">
+          <label>
+            <span>Workspace name</span>
+            <input id="workspace-name" maxlength="64" placeholder="Example: Medical desk" />
+          </label>
+          <label id="workspace-shared-label" class="checkbox-label" hidden>
+            <span class="checkbox-inner">
+              <input id="workspace-shared" type="checkbox" />
+              Share with all operators
+            </span>
+          </label>
+          <button id="workspace-save-button" class="btn btn-primary" type="button">
+            Save current layout
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="command-palette" class="command-palette">
+      <div class="command-shell">
+        <label for="command-query">Command palette</label>
+        <input
+          id="command-query"
+          autocomplete="off"
+          placeholder="Search commands, feeds, and transmissions"
+        />
+        <div id="command-results" class="command-results" role="listbox"></div>
+        <div class="command-hint">↑↓ navigate · Enter run · Esc close · ? shortcuts</div>
+      </div>
+    </dialog>
+
     <section id="console-panel" class="console-panel" aria-label="Program console" hidden>
       <div class="console-header">
         <div>
@@ -287,6 +533,7 @@
     </div>
     <div id="toast-container"></div>
 
-    <script src="/static/js/app.js?v=20260730-3"></script>
+    <script src="/static/js/app.js?v=20260730-4"></script>
+    <script src="/static/js/phase2.js?v=20260730-1"></script>
   </body>
 </html>

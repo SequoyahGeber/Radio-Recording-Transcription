@@ -166,7 +166,12 @@ def create_fixture(root, transcript_count=176):
                     separators=(",", ":"),
                 ),
                 status,
-                int(reviewed),
+                int(reviewed or corrected),
+                "corrected" if corrected else "confirmed" if reviewed else "unreviewed",
+                TEST_USERNAME if reviewed or corrected else None,
+                completed_at.isoformat() if reviewed or corrected else None,
+                "Routine fixture review complete." if reviewed else "",
+                1,
                 int(bookmarked),
                 notes,
                 TEST_USERNAME if corrected else None,
@@ -188,12 +193,13 @@ def create_fixture(root, transcript_count=176):
             INSERT INTO transcripts(
                 timestamp, recorded_at, filename, transcript_text,
                 raw_transcript_text, quality_score, quality_reason,
-                quality_metrics, status, reviewed, bookmarked, notes,
+                quality_metrics, status, reviewed, review_state, reviewed_by,
+                reviewed_at, review_resolution, version, bookmarked, notes,
                 corrected_by, corrected_at, transcription_model,
                 retry_transcript_text, retry_model, retry_quality_score,
                 retry_quality_reason, retry_quality_metrics, retry_status,
                 retry_attempted_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )

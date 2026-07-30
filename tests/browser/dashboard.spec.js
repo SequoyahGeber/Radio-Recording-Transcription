@@ -119,6 +119,21 @@ test("feed geometry is collision-free at every supported breakpoint", async ({
         () => document.documentElement.scrollWidth - window.innerWidth,
       );
       expect(pageOverflow).toBeLessThanOrEqual(1);
+      const clippedToolbarActions = await page
+        .locator(".topbar-actions > *:visible")
+        .evaluateAll((controls) =>
+          controls
+            .map((control) => ({
+              name: control.id || control.className,
+              rectangle: control.getBoundingClientRect().toJSON(),
+            }))
+            .filter(
+              ({ rectangle }) =>
+                rectangle.left < -1 || rectangle.right > window.innerWidth + 1,
+            )
+            .map(({ name }) => name),
+        );
+      expect(clippedToolbarActions).toEqual([]);
     });
   }
 });
@@ -159,10 +174,127 @@ test("cards expose one audio control and keep secondary actions in More", async 
     `.message-card[data-transcript-id="${transcriptId}"]`,
   );
   await expect(card.locator('[data-action="toggle-play"]')).toHaveCount(1);
+  await expect(card.locator("audio")).toHaveCount(0);
+  await expect(page.locator("audio#global-audio")).toHaveCount(1);
   await expect(card.locator('[data-action="toggle-card-audio"]')).toHaveCount(0);
   await card.getByText("More", { exact: true }).click();
   await expect(card.locator(".card-actions-menu")).toHaveAttribute("open", "");
-  await expect(card.locator(".message-actions [role='menuitem']")).toHaveCount(4);
+  await expect(card.locator(".message-actions [role='menuitem']")).toHaveCount(5);
+});
+
+test("detail drawer supports review states, model comparison, and undo", async ({
+  page,
+}) => {
+  await signIn(page);
+  const card = page.locator(".message-card.review-state-unreviewed").first();
+  const transcriptId = await card.getAttribute("data-transcript-id");
+  await card.locator(".transcript-content").click();
+
+  const drawer = page.locator("#transmission-drawer");
+  await expect(drawer).toBeVisible();
+  await expect(drawer.locator("#drawer-title")).toContainText(transcriptId);
+  await expect(drawer.locator("#drawer-transcript")).not.toBeEmpty();
+  await expect(drawer.locator("#drawer-comparison-section")).toBeVisible();
+  await expect(drawer.locator("#drawer-correction-section")).toBeVisible();
+
+  await drawer.locator("#drawer-review-state").selectOption("in_review");
+  await drawer
+    .locator("#drawer-review-resolution")
+    .fill("Confirm the responding callsign.");
+  await drawer
+    .locator("#drawer-notes")
+    .fill("Phase Two browser workflow review.");
+  await drawer.getByRole("button", { name: "Save changes" }).click();
+
+  await expect(
+    page.locator(
+      `.message-card[data-transcript-id="${transcriptId}"].review-state-in-review`,
+    ),
+  ).toBeVisible();
+  const undo = page.getByRole("button", { name: "Undo" });
+  await expect(undo).toBeVisible();
+  await undo.click();
+  await expect(
+    page.locator(
+      `.message-card[data-transcript-id="${transcriptId}"].review-state-unreviewed`,
+    ),
+  ).toBeVisible();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(drawer).toBeVisible();
+  const mobileDrawerGeometry = await drawer.evaluate((element) => {
+    const rectangle = element.getBoundingClientRect();
+    return {
+      left: Math.round(rectangle.left),
+      right: Math.round(rectangle.right),
+      viewport: window.innerWidth,
+      overflow: document.documentElement.scrollWidth - window.innerWidth,
+    };
+  });
+  expect(mobileDrawerGeometry).toEqual({
+    left: 0,
+    right: 390,
+    viewport: 390,
+    overflow: 0,
+  });
+});
+
+test("one global player provides transport, seek, speed, and volume controls", async ({
+  page,
+}) => {
+  await signIn(page);
+  const card = page.locator(".message-card").first();
+  await card.getByRole("button", { name: "Play recording in global player" }).click();
+
+  const player = page.locator("#global-player");
+  await expect(player).toBeVisible();
+  await expect(
+    player.getByRole("button", { name: /Play recording|Pause recording/ }),
+  ).toBeVisible();
+  await expect(
+    player.getByRole("button", { name: "Skip back 5 seconds" }),
+  ).toBeVisible();
+  await expect(
+    player.getByRole("button", { name: "Skip forward 5 seconds" }),
+  ).toBeVisible();
+  await expect(player.getByLabel("Recording position")).toBeVisible();
+  await expect(player.getByLabel("Playback speed")).toHaveValue("1");
+  await player.getByLabel("Playback speed").selectOption("1.5");
+  await expect(player.getByLabel("Playback speed")).toHaveValue("1.5");
+  await expect(player.getByLabel("Recording volume")).toBeVisible();
+  await player.getByRole("button", { name: "Close recording player" }).click();
+  await expect(player).toBeHidden();
+});
+
+test("keyboard workflow, command palette, feed focus, and saved workspaces work", async ({
+  page,
+}) => {
+  await signIn(page);
+
+  await page.keyboard.press("j");
+  const selected = page.locator(".message-card.keyboard-selected");
+  await expect(selected).toHaveCount(1);
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#transmission-drawer")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#transmission-drawer")).toBeHidden();
+
+  await page.keyboard.press("Meta+k");
+  await expect(page.locator("#command-palette")).toBeVisible();
+  await expect(page.locator(".command-result")).not.toHaveCount(0);
+  await page.keyboard.press("Escape");
+
+  const firstFeed = page.locator(".channel-column").first();
+  const firstFeedName = await firstFeed.getAttribute("data-channel");
+  await firstFeed.getByRole("button", { name: new RegExp(`Focus ${firstFeedName}`) }).click();
+  await expect(page.locator(".channel-column:visible")).toHaveCount(1);
+
+  await page.getByRole("button", { name: "Saved workspaces" }).click();
+  const dialog = page.locator("#workspace-dialog");
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel("Workspace name").fill("Phase Two Browser Desk");
+  await dialog.getByRole("button", { name: "Save current layout" }).click();
+  await expect(dialog.getByText("Phase Two Browser Desk", { exact: true })).toBeVisible();
 });
 
 test("export count matches the complete streamed CSV", async ({ page }) => {

@@ -680,9 +680,10 @@ function createColumn(channelName, announce = true) {
   col.innerHTML = `
       <div class="col-header">
           <div class="col-title-row">
-              <div class="col-title"><span class="col-name">${safeChannelName}</span> <span class="channel-count" id="count-${colId}">0</span></div>
-              <div class="col-actions">
-                  <button class="arrow-btn" data-action="move-column" data-column-id="${colId}" data-direction="left" title="Move left" aria-label="Move ${safeChannelName} left">◀</button>
+	              <div class="col-title"><span class="col-name">${safeChannelName}</span> <span class="channel-count" id="count-${colId}">0</span></div>
+	              <div class="col-actions">
+	                  <button class="arrow-btn focus-feed-button" data-action="focus-column" data-column-id="${colId}" title="Focus feed" aria-label="Focus ${safeChannelName} feed">⌾</button>
+	                  <button class="arrow-btn" data-action="move-column" data-column-id="${colId}" data-direction="left" title="Move left" aria-label="Move ${safeChannelName} left">◀</button>
                   <button class="arrow-btn" data-action="move-column" data-column-id="${colId}" data-direction="right" title="Move right" aria-label="Move ${safeChannelName} right">▶</button>
                   <button class="scroll-toggle active" data-action="toggle-auto-scroll" data-column-id="${colId}" aria-pressed="true">Following live</button>
               </div>
@@ -758,6 +759,10 @@ function toggleAudio(audio) {
 }
 
 function togglePlay(btn) {
+  if (window.phaseTwoPlayCard) {
+    window.phaseTwoPlayCard(btn.closest(".message-card"));
+    return;
+  }
   toggleAudio(btn.parentElement.querySelector("audio"));
 }
 
@@ -799,12 +804,21 @@ function formatTime(seconds) {
 function createMessageCard(data) {
   const card = document.createElement("div");
   card.className = "message-card";
+  card.tabIndex = 0;
+  card.setAttribute("role", "article");
   card.dataset.filename = String(data.filename || "");
   if (data.status === "suspect") card.classList.add("is-suspect");
-  if (data.reviewed) card.classList.add("is-reviewed");
+  const reviewState =
+    data.review_state || (data.reviewed ? "confirmed" : "unreviewed");
+  if (["confirmed", "corrected"].includes(reviewState)) {
+    card.classList.add("is-reviewed");
+  }
+  card.classList.add(`review-state-${reviewState.replaceAll("_", "-")}`);
   if (data.bookmarked) card.classList.add("is-bookmarked");
   if (data.id) {
     card.dataset.transcriptId = String(data.id);
+    card.dataset.version = String(data.version || 1);
+    card.dataset.reviewState = reviewState;
     const transcriptId = Number(data.id) || 0;
     lastSeenTranscriptId = Math.max(lastSeenTranscriptId, transcriptId);
   }
@@ -870,8 +884,14 @@ function createMessageCard(data) {
     data.retry_status === "selected"
       ? '<span class="correction-badge" title="The Medium result was replaced after a selective second pass">Large V3 rescue</span>'
       : "";
-  const reviewedBadge = data.reviewed
-    ? '<span class="card-state-badge reviewed-state">✓ Reviewed</span>'
+  const reviewLabels = {
+    in_review: "In review",
+    confirmed: "Confirmed",
+    corrected: "Corrected",
+    dismissed: "Dismissed",
+  };
+  const reviewedBadge = reviewLabels[reviewState]
+    ? `<span class="card-state-badge reviewed-state review-${escapeHTML(reviewState)}">${escapeHTML(reviewLabels[reviewState])}</span>`
     : "";
   const bookmarkBadge = data.bookmarked
     ? '<span class="card-state-badge bookmark-state">★ Saved</span>'
@@ -881,7 +901,8 @@ function createMessageCard(data) {
       <details class="card-actions-menu">
         <summary aria-label="More transmission actions">More</summary>
         <div class="message-actions" role="menu">
-          <button class="card-action ${data.reviewed ? "active" : ""}" data-action="review-transcript" role="menuitem">${data.reviewed ? "Mark unreviewed" : "Mark reviewed"}</button>
+          <button class="card-action" data-action="open-transmission" role="menuitem">Open details</button>
+          <button class="card-action ${reviewState === "confirmed" ? "active" : ""}" data-action="review-transcript" role="menuitem">${reviewState === "confirmed" ? "Mark unreviewed" : "Mark confirmed"}</button>
           <button class="card-action ${data.bookmarked ? "active" : ""}" data-action="bookmark-transcript" role="menuitem">${data.bookmarked ? "Remove bookmark" : "Bookmark"}</button>
           <button class="card-action" data-action="note-transcript" role="menuitem">${data.notes ? "Edit note" : "Add note"}</button>
           ${canCorrect ? '<button class="card-action" data-action="correct-transcript" role="menuitem">Correct transcript</button>' : ""}
@@ -890,14 +911,13 @@ function createMessageCard(data) {
     : "";
   const audioPlayer = canAudio
     ? `
-      <div class="custom-audio-player">
-          <button class="play-btn" data-action="toggle-play" aria-label="Play recording" title="Play recording">▶</button>
-          <div class="progress-bar-container" data-action="seek-audio">
-              <div class="progress-fill"></div>
-          </div>
-          <div class="time-display">0:00</div>
-          <audio src="${safeAudioUrl}" preload="none"></audio>
-      </div>`
+      <button
+        class="card-play-button"
+        data-action="toggle-play"
+        data-audio-url="${safeAudioUrl}"
+        aria-label="Play recording in global player"
+        title="Play recording"
+      ><span aria-hidden="true">▶</span><span>Play recording</span></button>`
     : '<div class="audio-restricted">Audio requires operator clearance</div>';
 
   card.innerHTML = `
@@ -1614,7 +1634,10 @@ async function updateTranscriptCard(card, changes) {
   const response = await fetch(`/api/transcripts/${transcriptId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(changes),
+    body: JSON.stringify({
+      ...changes,
+      version: Number(card.dataset.version || 1),
+    }),
   });
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.detail || "Update failed");
@@ -1628,23 +1651,34 @@ async function handleTranscriptAction(control) {
   const action = control.dataset.action;
   try {
     if (action === "review-transcript") {
-      await updateTranscriptCard(card, {
-        reviewed: !card.classList.contains("is-reviewed"),
-      });
-    } else if (action === "bookmark-transcript") {
-      await updateTranscriptCard(card, {
-        bookmarked: !card.classList.contains("is-bookmarked"),
-      });
-    } else if (action === "note-transcript") {
-      const existing = card.querySelector(".operator-note")?.innerText || "";
-      const notes = window.prompt("Operator note", existing);
-      if (notes !== null) await updateTranscriptCard(card, { notes });
-    } else if (action === "correct-transcript") {
-      const existing = card.querySelector(".transcript-content")?.innerText || "";
-      const transcriptText = window.prompt("Corrected transcript", existing);
-      if (transcriptText?.trim()) {
-        await updateTranscriptCard(card, { transcript_text: transcriptText.trim() });
+      const reviewState =
+        card.dataset.reviewState === "confirmed" ? "unreviewed" : "confirmed";
+      if (window.phaseTwoQuickCardMutation) {
+        await window.phaseTwoQuickCardMutation(
+          card,
+          { review_state: reviewState },
+          reviewState === "confirmed"
+            ? "Transmission confirmed."
+            : "Transmission marked unreviewed.",
+        );
+      } else {
+        await updateTranscriptCard(card, { review_state: reviewState });
       }
+    } else if (action === "bookmark-transcript") {
+      const bookmarked = !card.classList.contains("is-bookmarked");
+      if (window.phaseTwoQuickCardMutation) {
+        await window.phaseTwoQuickCardMutation(
+          card,
+          { bookmarked },
+          bookmarked ? "Transmission bookmarked." : "Bookmark removed.",
+        );
+      } else {
+        await updateTranscriptCard(card, { bookmarked });
+      }
+    } else if (action === "note-transcript") {
+      window.phaseTwoOpenDrawer?.(card.dataset.transcriptId, "notes");
+    } else if (action === "correct-transcript") {
+      window.phaseTwoOpenDrawer?.(card.dataset.transcriptId, "correction");
     }
   } catch (error) {
     showToast(error.message, "danger");
@@ -1889,6 +1923,7 @@ for (const eventName of ["timeupdate", "ended", "play", "playing", "pause"]) {
     eventName,
     (event) => {
       if (event.target.tagName !== "AUDIO") return;
+      if (event.target.id === "global-audio") return;
       if (eventName === "timeupdate") updateProgress(event.target);
       else if (eventName === "ended") resetPlayer(event.target);
       else if (eventName === "play") updatePlayState(event.target, "waiting");

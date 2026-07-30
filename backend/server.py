@@ -145,9 +145,18 @@ class SetupPayload(BaseModel):
 
 class TranscriptUpdatePayload(BaseModel):
     reviewed: Optional[bool] = None
+    review_state: Optional[str] = None
+    review_resolution: Optional[str] = None
+    version: Optional[int] = None
     bookmarked: Optional[bool] = None
     notes: Optional[str] = None
     transcript_text: Optional[str] = None
+
+
+class WorkspacePayload(BaseModel):
+    name: str
+    configuration: dict
+    is_shared: bool = False
 
 
 class UserPayload(BaseModel):
@@ -156,6 +165,33 @@ class UserPayload(BaseModel):
     role: str = "viewer"
     password: Optional[str] = None
     active: bool = True
+
+
+REVIEW_STATES = {
+    "unreviewed",
+    "in_review",
+    "confirmed",
+    "corrected",
+    "dismissed",
+}
+TRANSCRIPT_DETAIL_COLUMNS = """
+    id, timestamp, recorded_at, filename, transcript_text,
+    raw_transcript_text, quality_score, quality_reason, quality_metrics,
+    status, reviewed, review_state, reviewed_by, reviewed_at,
+    review_resolution, version, bookmarked, notes, corrected_by,
+    corrected_at, transcription_model, retry_transcript_text, retry_model,
+    retry_quality_score, retry_quality_reason, retry_quality_metrics,
+    retry_status, retry_attempted_at
+"""
+WORKSPACE_ALLOWED_KEYS = {
+    "visible_feeds",
+    "feed_order",
+    "focused_feed",
+    "view_mode",
+    "filters",
+    "compact",
+    "alerts_visible",
+}
 
 
 def secure_headers(response):
@@ -367,7 +403,13 @@ def build_stats():
 
 
 def transcript_row_to_dict(row):
-    return {
+    row_keys = set(row.keys())
+    review_state = (
+        row["review_state"]
+        if "review_state" in row_keys and row["review_state"]
+        else ("confirmed" if row["reviewed"] else "unreviewed")
+    )
+    payload = {
         "id": row["id"],
         "timestamp": row["timestamp"],
         "recorded_at": row["recorded_at"],
@@ -376,7 +418,16 @@ def transcript_row_to_dict(row):
         "quality_score": row["quality_score"],
         "quality_reason": row["quality_reason"] or "",
         "status": row["status"],
-        "reviewed": bool(row["reviewed"]),
+        "reviewed": review_state in {"confirmed", "corrected"},
+        "review_state": review_state,
+        "reviewed_by": row["reviewed_by"] if "reviewed_by" in row_keys else None,
+        "reviewed_at": row["reviewed_at"] if "reviewed_at" in row_keys else None,
+        "review_resolution": (
+            row["review_resolution"] or ""
+            if "review_resolution" in row_keys
+            else ""
+        ),
+        "version": row["version"] if "version" in row_keys else 1,
         "bookmarked": bool(row["bookmarked"]),
         "notes": row["notes"] or "",
         "corrected_by": row["corrected_by"],
@@ -384,6 +435,19 @@ def transcript_row_to_dict(row):
         "transcription_model": row["transcription_model"],
         "retry_status": row["retry_status"],
     }
+    for column in (
+        "raw_transcript_text",
+        "quality_metrics",
+        "retry_transcript_text",
+        "retry_model",
+        "retry_quality_score",
+        "retry_quality_reason",
+        "retry_quality_metrics",
+        "retry_attempted_at",
+    ):
+        if column in row_keys:
+            payload[column] = row[column]
+    return payload
 
 
 def transcript_filter(
@@ -492,7 +556,8 @@ def query_transcripts(
         SELECT id, timestamp, recorded_at, filename, transcript_text,
                quality_score, quality_reason, status, reviewed, bookmarked,
                notes, corrected_by, corrected_at, transcription_model,
-               retry_status
+               retry_status, review_state, reviewed_by, reviewed_at,
+               review_resolution, version
         FROM transcripts
         WHERE {where_clause}
         ORDER BY {order_by}
@@ -888,6 +953,42 @@ def export_count(
     return {"count": row_count, "through_id": through_id}
 
 
+@app.get("/api/transcripts/{transcript_id}")
+def get_transcript_detail(transcript_id: int, request: Request):
+    require_role(request, "viewer")
+    with connect(read_only=True) as connection:
+        row = connection.execute(
+            f"SELECT {TRANSCRIPT_DETAIL_COLUMNS} FROM transcripts WHERE id = ?",
+            (transcript_id,),
+        ).fetchone()
+        history_rows = connection.execute(
+            """
+            SELECT version, changed_at, changed_by, change_type,
+                   before_json, after_json
+            FROM transcript_versions
+            WHERE transcript_id = ?
+            ORDER BY id DESC
+            LIMIT 25
+            """,
+            (transcript_id,),
+        ).fetchall()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Transmission not found")
+    result = transcript_row_to_dict(row)
+    result["history"] = [
+        {
+            "version": history["version"],
+            "changed_at": history["changed_at"],
+            "changed_by": history["changed_by"],
+            "change_type": history["change_type"],
+            "before": json.loads(history["before_json"]),
+            "after": json.loads(history["after_json"]),
+        }
+        for history in history_rows
+    ]
+    return result
+
+
 @app.patch("/api/transcripts/{transcript_id}")
 def update_transcript(
     transcript_id: int,
@@ -898,17 +999,42 @@ def update_transcript(
     updates = []
     parameters = []
     action_details = {}
-    if payload.reviewed is not None:
-        updates.append("reviewed = ?")
-        parameters.append(int(payload.reviewed))
-        action_details["reviewed"] = payload.reviewed
+    now = datetime.now().isoformat()
+
+    requested_review_state = payload.review_state
+    if requested_review_state is None and payload.reviewed is not None:
+        requested_review_state = "confirmed" if payload.reviewed else "unreviewed"
+    if requested_review_state is not None:
+        if requested_review_state not in REVIEW_STATES:
+            raise HTTPException(status_code=400, detail="Invalid review state")
+        updates.extend(
+            [
+                "review_state = ?",
+                "reviewed = ?",
+                "reviewed_by = ?",
+                "reviewed_at = ?",
+            ]
+        )
+        parameters.extend(
+            [
+                requested_review_state,
+                int(requested_review_state in {"confirmed", "corrected"}),
+                session["u"] if requested_review_state != "unreviewed" else None,
+                now if requested_review_state != "unreviewed" else None,
+            ]
+        )
+        action_details["review_state"] = requested_review_state
+    if payload.review_resolution is not None:
+        updates.append("review_resolution = ?")
+        parameters.append(payload.review_resolution.strip()[:1000])
+        action_details["review_resolution_updated"] = True
     if payload.bookmarked is not None:
         updates.append("bookmarked = ?")
         parameters.append(int(payload.bookmarked))
         action_details["bookmarked"] = payload.bookmarked
     if payload.notes is not None:
         updates.append("notes = ?")
-        parameters.append(payload.notes[:4000])
+        parameters.append(payload.notes.strip()[:4000])
         action_details["notes_updated"] = True
     if payload.transcript_text is not None:
         if not role_allows(session, "supervisor"):
@@ -924,33 +1050,178 @@ def update_transcript(
                 "status = 'ready'",
                 "quality_reason = ''",
                 "quality_score = 1.0",
+                "review_state = 'corrected'",
+                "reviewed = 1",
+                "reviewed_by = ?",
+                "reviewed_at = ?",
             ]
         )
-        parameters.extend([corrected, session["u"], datetime.now().isoformat()])
+        parameters.extend([corrected, session["u"], now, session["u"], now])
         action_details["corrected"] = True
     if not updates:
         raise HTTPException(status_code=400, detail="No changes supplied")
-    parameters.append(transcript_id)
+
     with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        before_row = connection.execute(
+            f"SELECT {TRANSCRIPT_DETAIL_COLUMNS} FROM transcripts WHERE id = ?",
+            (transcript_id,),
+        ).fetchone()
+        if before_row is None:
+            raise HTTPException(status_code=404, detail="Transmission not found")
+        if payload.version is not None and payload.version != before_row["version"]:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "This transmission changed in another session",
+                    "current": transcript_row_to_dict(before_row),
+                },
+            )
+
+        parameters.append(transcript_id)
         connection.execute(
-            f"UPDATE transcripts SET {', '.join(updates)} WHERE id = ?",
+            f"""
+            UPDATE transcripts
+            SET {', '.join(updates)}, version = version + 1
+            WHERE id = ?
+            """,
             parameters,
         )
         row = connection.execute(
-            """
-            SELECT id, timestamp, recorded_at, filename, transcript_text,
-                   quality_score, quality_reason, status, reviewed, bookmarked,
-                   notes, corrected_by, corrected_at, transcription_model,
-                   retry_status
-            FROM transcripts WHERE id = ?
-            """,
+            f"SELECT {TRANSCRIPT_DETAIL_COLUMNS} FROM transcripts WHERE id = ?",
             (transcript_id,),
         ).fetchone()
+        before_payload = transcript_row_to_dict(before_row)
+        after_payload = transcript_row_to_dict(row)
+        change_type = (
+            "correction"
+            if payload.transcript_text is not None
+            else "review"
+            if requested_review_state is not None
+            else "annotation"
+        )
+        connection.execute(
+            """
+            INSERT INTO transcript_versions(
+                transcript_id, version, changed_at, changed_by,
+                change_type, before_json, after_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                transcript_id,
+                row["version"],
+                now,
+                session["u"],
+                change_type,
+                json.dumps(before_payload, separators=(",", ":"), sort_keys=True),
+                json.dumps(after_payload, separators=(",", ":"), sort_keys=True),
+            ),
+        )
         connection.commit()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Transmission not found")
     audit(session["u"], "update_transcript", transcript_id, action_details)
     return transcript_row_to_dict(row)
+
+
+def workspace_row_to_dict(row):
+    return {
+        "id": row["id"],
+        "owner_username": row["owner_username"],
+        "name": row["name"],
+        "configuration": json.loads(row["configuration"]),
+        "is_shared": bool(row["is_shared"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def validate_workspace(payload):
+    name = payload.name.strip()
+    if not 1 <= len(name) <= 64:
+        raise HTTPException(status_code=400, detail="Workspace name must be 1–64 characters")
+    unknown_keys = set(payload.configuration) - WORKSPACE_ALLOWED_KEYS
+    if unknown_keys:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported workspace settings: {', '.join(sorted(unknown_keys))}",
+        )
+    encoded = json.dumps(payload.configuration, separators=(",", ":"), sort_keys=True)
+    if len(encoded.encode("utf-8")) > 50_000:
+        raise HTTPException(status_code=400, detail="Workspace configuration is too large")
+    return name, encoded
+
+
+@app.get("/api/workspaces")
+def get_workspaces(request: Request):
+    session = require_role(request, "viewer")
+    with connect(read_only=True) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, owner_username, name, configuration, is_shared,
+                   created_at, updated_at
+            FROM saved_workspaces
+            WHERE owner_username = ? OR is_shared = 1
+            ORDER BY is_shared DESC, lower(name), id
+            """,
+            (session["u"],),
+        ).fetchall()
+    return [workspace_row_to_dict(row) for row in rows]
+
+
+@app.post("/api/workspaces")
+def save_workspace(payload: WorkspacePayload, request: Request):
+    session = require_role(request, "viewer")
+    if payload.is_shared and not role_allows(session, "supervisor"):
+        raise HTTPException(status_code=403, detail="Supervisor clearance required")
+    name, configuration = validate_workspace(payload)
+    now = datetime.now().isoformat()
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO saved_workspaces(
+                owner_username, name, configuration, is_shared,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(owner_username, name) DO UPDATE SET
+                configuration = excluded.configuration,
+                is_shared = excluded.is_shared,
+                updated_at = excluded.updated_at
+            """,
+            (session["u"], name, configuration, int(payload.is_shared), now, now),
+        )
+        row = connection.execute(
+            """
+            SELECT id, owner_username, name, configuration, is_shared,
+                   created_at, updated_at
+            FROM saved_workspaces
+            WHERE owner_username = ? AND name = ?
+            """,
+            (session["u"], name),
+        ).fetchone()
+        connection.commit()
+    audit(
+        session["u"],
+        "save_workspace",
+        details={"workspace_id": row["id"], "shared": payload.is_shared},
+    )
+    return workspace_row_to_dict(row)
+
+
+@app.delete("/api/workspaces/{workspace_id}")
+def delete_workspace(workspace_id: int, request: Request):
+    session = require_role(request, "viewer")
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT owner_username, name FROM saved_workspaces WHERE id = ?",
+            (workspace_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Workspace not found")
+        if row["owner_username"] != session["u"] and not role_allows(session, "admin"):
+            raise HTTPException(status_code=403, detail="Only the owner can delete this workspace")
+        connection.execute("DELETE FROM saved_workspaces WHERE id = ?", (workspace_id,))
+        connection.commit()
+    audit(session["u"], "delete_workspace", details={"workspace_id": workspace_id})
+    return {"ok": True}
 
 
 @app.get("/api/users")

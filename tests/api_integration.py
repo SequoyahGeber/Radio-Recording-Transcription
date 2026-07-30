@@ -132,6 +132,182 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertTrue(update.json()["reviewed"])
         self.assertTrue(update.json()["bookmarked"])
 
+    def test_phase_two_review_workflow_history_and_version_conflict(self):
+        filename = "PhaseTwo/2026-07-30-12-00-00-review-workflow.mp3"
+        with connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO transcripts(
+                    timestamp, recorded_at, filename, transcript_text,
+                    raw_transcript_text, quality_score, quality_reason, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "2026-07-30T12:00:05",
+                    "2026-07-30T12:00:00",
+                    filename,
+                    "phase two workflow transmission",
+                    "phase two workflow transmission",
+                    0.92,
+                    "",
+                    "ready",
+                ),
+            )
+            transcript_id = cursor.lastrowid
+            connection.commit()
+        try:
+            detail = self.client.get(f"/api/transcripts/{transcript_id}")
+            self.assertEqual(detail.status_code, 200)
+            self.assertEqual(detail.json()["review_state"], "unreviewed")
+            starting_version = detail.json()["version"]
+
+            review = self.client.patch(
+                f"/api/transcripts/{transcript_id}",
+                json={
+                    "review_state": "in_review",
+                    "review_resolution": "Confirm the callsign",
+                    "notes": "Assigned during the current shift.",
+                    "version": starting_version,
+                },
+            )
+            self.assertEqual(review.status_code, 200)
+            self.assertEqual(review.json()["review_state"], "in_review")
+            self.assertEqual(review.json()["version"], starting_version + 1)
+            self.assertEqual(review.json()["reviewed_by"], "admin")
+
+            stale = self.client.patch(
+                f"/api/transcripts/{transcript_id}",
+                json={"bookmarked": True, "version": starting_version},
+            )
+            self.assertEqual(stale.status_code, 409)
+            self.assertEqual(
+                stale.json()["detail"]["current"]["version"],
+                starting_version + 1,
+            )
+
+            correction = self.client.patch(
+                f"/api/transcripts/{transcript_id}",
+                json={
+                    "transcript_text": "Corrected phase two workflow transmission",
+                    "version": review.json()["version"],
+                },
+            )
+            self.assertEqual(correction.status_code, 200)
+            self.assertEqual(correction.json()["review_state"], "corrected")
+            self.assertTrue(correction.json()["reviewed"])
+
+            refreshed = self.client.get(f"/api/transcripts/{transcript_id}").json()
+            self.assertEqual(len(refreshed["history"]), 2)
+            self.assertEqual(refreshed["history"][0]["change_type"], "correction")
+            self.assertEqual(refreshed["history"][1]["change_type"], "review")
+        finally:
+            with connect() as connection:
+                connection.execute(
+                    "DELETE FROM transcript_versions WHERE transcript_id = ?",
+                    (transcript_id,),
+                )
+                connection.execute(
+                    "DELETE FROM transcripts WHERE id = ?",
+                    (transcript_id,),
+                )
+                connection.commit()
+
+    def test_phase_two_saved_workspaces_are_server_backed_and_scoped(self):
+        personal_name = "Phase Two Personal"
+        shared_name = "Phase Two Shared"
+        viewer_name = "Phase Two Viewer"
+        configuration = {
+            "visible_feeds": ["Alpha"],
+            "feed_order": ["Alpha", "Bravo"],
+            "focused_feed": "Alpha",
+            "view_mode": "board",
+            "filters": {"query": "medical"},
+            "compact": True,
+            "alerts_visible": False,
+        }
+        try:
+            personal = self.client.post(
+                "/api/workspaces",
+                json={
+                    "name": personal_name,
+                    "configuration": configuration,
+                    "is_shared": False,
+                },
+            )
+            self.assertEqual(personal.status_code, 200)
+            shared = self.client.post(
+                "/api/workspaces",
+                json={
+                    "name": shared_name,
+                    "configuration": configuration,
+                    "is_shared": True,
+                },
+            )
+            self.assertEqual(shared.status_code, 200)
+
+            self.assertEqual(
+                self.client.post(
+                    "/api/users",
+                    json={
+                        "username": "phase-two-viewer",
+                        "display_name": "Phase Two Viewer",
+                        "role": "viewer",
+                        "password": "phase-two-viewer-password",
+                        "active": True,
+                    },
+                ).status_code,
+                200,
+            )
+            viewer = TestClient(app, base_url="https://127.0.0.1")
+            self.assertEqual(
+                viewer.post(
+                    "/api/login",
+                    json={
+                        "username": "phase-two-viewer",
+                        "password": "phase-two-viewer-password",
+                    },
+                ).status_code,
+                200,
+            )
+            visible = viewer.get("/api/workspaces")
+            self.assertEqual(visible.status_code, 200)
+            self.assertEqual(
+                [workspace["name"] for workspace in visible.json()],
+                [shared_name],
+            )
+            forbidden = viewer.post(
+                "/api/workspaces",
+                json={
+                    "name": viewer_name,
+                    "configuration": configuration,
+                    "is_shared": True,
+                },
+            )
+            self.assertEqual(forbidden.status_code, 403)
+            own = viewer.post(
+                "/api/workspaces",
+                json={
+                    "name": viewer_name,
+                    "configuration": configuration,
+                    "is_shared": False,
+                },
+            )
+            self.assertEqual(own.status_code, 200)
+            self.assertEqual(
+                viewer.delete(f"/api/workspaces/{shared.json()['id']}").status_code,
+                403,
+            )
+        finally:
+            with connect() as connection:
+                connection.execute(
+                    """
+                    DELETE FROM saved_workspaces
+                    WHERE name IN (?, ?, ?)
+                    """,
+                    (personal_name, shared_name, viewer_name),
+                )
+                connection.commit()
+
     def test_operator_has_dashboard_access_without_admin_console(self):
         create_response = self.client.post(
             "/api/users",
