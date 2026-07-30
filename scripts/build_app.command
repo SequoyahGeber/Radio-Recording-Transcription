@@ -39,7 +39,7 @@ sips -z 256 256 macos/AppIcon.png --out "$ICONSET_DIR/icon_256x256.png" >/dev/nu
 sips -z 512 512 macos/AppIcon.png --out "$ICONSET_DIR/icon_256x256@2x.png" >/dev/null
 sips -z 512 512 macos/AppIcon.png --out "$ICONSET_DIR/icon_512x512.png" >/dev/null
 sips -z 1024 1024 macos/AppIcon.png --out "$ICONSET_DIR/icon_512x512@2x.png" >/dev/null
-iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/AppIcon.icns"
+./venv/bin/python scripts/build_icns.py "$ICONSET_DIR" "$RESOURCES_DIR/AppIcon.icns"
 
 PYTHON_FRAMEWORK_SOURCE="$(
     ./venv/bin/python -c \
@@ -54,19 +54,20 @@ if [[ ! -d "$PYTHON_FRAMEWORK_SOURCE" || ! -d "$SITE_PACKAGES_SOURCE" ]]; then
 fi
 
 mkdir -p "$RUNTIME_DIR" "$PYTHON_RESOURCES_DIR"
-ditto backend "$RUNTIME_DIR/backend"
-ditto frontend "$RUNTIME_DIR/frontend"
-ditto scripts "$RUNTIME_DIR/scripts"
-ditto models "$RUNTIME_DIR/models"
-ditto "$SITE_PACKAGES_SOURCE" "$RUNTIME_DIR/site-packages"
+cp -R backend "$RUNTIME_DIR/backend"
+cp -R frontend "$RUNTIME_DIR/frontend"
+cp -R scripts "$RUNTIME_DIR/scripts"
+cp -R models "$RUNTIME_DIR/models"
+cp -R "$SITE_PACKAGES_SOURCE" "$RUNTIME_DIR/site-packages"
 # mlx-whisper declares PyTorch for an optional conversion helper, but the app's
 # native MLX transcription path does not import it. Excluding it keeps the
 # self-contained release below GitHub's release-asset size ceiling.
 find "$RUNTIME_DIR/site-packages" -maxdepth 1 \
     \( -name 'torch' -o -name 'torch-*.dist-info' -o -name 'torchgen' \) \
     -exec rm -rf {} +
+find "$RUNTIME_DIR" -type d -name '__pycache__' -prune -exec rm -rf {} +
 cp sync.py "$RUNTIME_DIR/sync.py"
-ditto "$PYTHON_FRAMEWORK_SOURCE" "$PYTHON_FRAMEWORK_DESTINATION"
+cp -R "$PYTHON_FRAMEWORK_SOURCE" "$PYTHON_FRAMEWORK_DESTINATION"
 
 EMBEDDED_PYTHON="$PYTHON_FRAMEWORK_DESTINATION/Versions/$PYTHON_VERSION/bin/python$PYTHON_VERSION"
 EMBEDDED_FRAMEWORK_SITE_PACKAGES="$PYTHON_FRAMEWORK_DESTINATION/Versions/$PYTHON_VERSION/lib/python$PYTHON_VERSION/site-packages"

@@ -24,7 +24,7 @@ if [[ "${SKIP_APP_BUILD:-0}" != "1" ]]; then
 fi
 
 mkdir -p "$STAGING_DIR"
-ditto "$APP_SOURCE" "$STAGING_DIR/$APP_NAME.app"
+cp -R "$APP_SOURCE" "$STAGING_DIR/$APP_NAME.app"
 xattr -cr "$STAGING_DIR/$APP_NAME.app"
 codesign --force --deep --sign - "$STAGING_DIR/$APP_NAME.app"
 codesign --verify --deep --strict "$STAGING_DIR/$APP_NAME.app"
@@ -40,4 +40,13 @@ hdiutil create \
     "$DMG_PATH"
 
 hdiutil verify "$DMG_PATH"
+CHECKSUM_PATH="$DMG_PATH.sha256"
+DMG_DIRECTORY="$(dirname "$DMG_PATH")"
+DMG_BASENAME="$(basename "$DMG_PATH")"
+CHECKSUM_BASENAME="$(basename "$CHECKSUM_PATH")"
+(
+    cd "$DMG_DIRECTORY"
+    shasum -a 256 "$DMG_BASENAME" > "$CHECKSUM_BASENAME"
+)
 echo "Built and verified: $DMG_PATH"
+echo "Release checksum: $CHECKSUM_PATH"

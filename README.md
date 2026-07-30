@@ -20,6 +20,7 @@ them with Whisper, and presents a secure live operations dashboard.
 - The newest 100 transmissions load first; scrolling upward fetches older pages.
 - Operators can inspect browser, server, transcription, and sync events in the dashboard console.
 - A native Mac launcher embeds the secure dashboard alongside service and folder controls.
+- Administrators can check GitHub Releases and install verified app updates in place.
 - A process supervisor supplies backoff, clean shutdown, and rotating service logs.
 
 ## Install on a Mac
@@ -91,6 +92,28 @@ take precedence:
 Runtime data, recordings, databases, models, logs, settings, and credentials
 remain excluded from source control.
 
+## App updates
+
+Administrators can expand **App Controls** in the Mac app and choose
+**Updates**. The app also performs one quiet update check after an
+administrator signs in. Update checks use the repository's latest stable
+GitHub Release; draft and prerelease builds are never installed.
+
+Before installation, the updater:
+
+- requires a newer semantic version and the expected Apple-silicon DMG name;
+- verifies the GitHub asset SHA-256 digest or its companion `.sha256` file;
+- asks macOS to verify the DMG and the app's complete code signature;
+- confirms the app bundle identifier and release version;
+- stops the services cleanly and stages the replacement outside the app bundle;
+- snapshots the database, security profiles, and settings for recovery;
+- keeps recordings and all other Application Support data in place; and
+- retains the immediately previous app so a failed launch can roll back.
+
+Updates replace only `Radio Command Center.app`. The updater refuses to run if
+the app and its data directory overlap. If the app is opened directly from a
+DMG, drag it to **Applications** before updating.
+
 ## Deployment
 
 Radio Command Center uses one administrator Mac as the transcription host. The
@@ -107,6 +130,19 @@ VPN address and trusting the generated dashboard CA certificate on each client.
 For distribution outside a managed local network, package the administrator
 host as a signed and notarized macOS installer and distribute a separate
 lightweight dashboard client or browser link to everyone else.
+
+### Publishing an update
+
+1. Set `CFBundleShortVersionString` in `macos/Info.plist` to the release version.
+2. Run `scripts/build_dmg.command`.
+3. Create a stable GitHub Release tagged `v<version>`.
+4. Attach both the generated
+   `Radio-Command-Center-<version>-arm64.dmg` and
+   `Radio-Command-Center-<version>-arm64.dmg.sha256` files.
+
+GitHub's asset digest is accepted when present, but publishing the checksum
+file keeps verification compatible with GitHub responses that omit it. The
+DMG filename, bundle version, and release tag must match exactly.
 
 ## Operations and recovery
 

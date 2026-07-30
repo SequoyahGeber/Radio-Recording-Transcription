@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var sourceField: NSTextField!
     private var webView: WKWebView!
     private var chooseSourceButton: NSButton!
+    private var updateButton: NSButton!
     private var sourcePanel: NSPanel?
     private var folderPathField: NSTextField!
     private var folderStatusField: NSTextField!
@@ -34,6 +35,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var dashboardLoadInProgress = false
     private var dashboardLoaded = false
     private var statusRefreshInFlight = false
+    private var updateCheckInFlight = false
+    private var automaticUpdateChecked = false
     private let collapsedHeaderHeight: CGFloat = 46
     private let expandedHeaderHeight: CGFloat = 104
 
@@ -71,6 +74,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             for: .applicationSupportDirectory,
             in: .userDomainMask
         )[0].appendingPathComponent("Radio Command Center", isDirectory: true)
+    }
+
+    private var applicationVersion: String {
+        Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String ?? "0.0.0"
+    }
+
+    private var updateRepository: String {
+        Bundle.main.object(
+            forInfoDictionaryKey: "RCCGitHubRepository"
+        ) as? String ?? "SequoyahGeber/Radio-Recording-Transcription"
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -147,6 +162,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         reloadButton.autoresizingMask = [.minXMargin]
         appHeader.addSubview(reloadButton)
 
+        updateButton = button("Updates", action: #selector(checkForUpdates))
+        updateButton.frame = NSRect(x: 1056, y: 8, width: 92, height: 30)
+        updateButton.autoresizingMask = [.minXMargin]
+        appHeader.addSubview(updateButton)
+
         appHeaderToggleButton = button("App Controls", action: #selector(toggleAppHeader))
         appHeaderToggleButton.frame = NSRect(x: 1068, y: 8, width: 132, height: 30)
         appHeaderToggleButton.autoresizingMask = [.minXMargin, .minYMargin]
@@ -161,6 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             restartButton,
             stopButton,
             reloadButton,
+            updateButton,
         ]
         appHeaderExpandedViews.forEach { $0.isHidden = true }
 
@@ -297,6 +318,229 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         } catch {
             statusLabel.stringValue = error.localizedDescription
             completion(nil)
+        }
+    }
+
+    private func runUpdater(
+        _ arguments: [String],
+        completion: @escaping ([String: Any]?) -> Void
+    ) {
+        guard FileManager.default.isExecutableFile(atPath: pythonURL.path) else {
+            statusLabel.stringValue = "The bundled update runtime is unavailable"
+            completion(nil)
+            return
+        }
+        let updaterURL = projectRoot.appendingPathComponent("scripts/app_updater.py")
+        guard FileManager.default.fileExists(atPath: updaterURL.path) else {
+            statusLabel.stringValue = "The app updater is unavailable"
+            completion(nil)
+            return
+        }
+
+        let process = Process()
+        process.executableURL = pythonURL
+        process.arguments = [updaterURL.path] + arguments
+        process.currentDirectoryURL = projectRoot
+        var environment = ProcessInfo.processInfo.environment
+        environment["RADIO_DATA_DIR"] = applicationDataURL.path
+        if let resources = Bundle.main.resourceURL, bundledRuntimeRoot != nil {
+            let pythonHome = resources.appendingPathComponent(
+                "python/Python.framework/Versions/3.12"
+            )
+            let sitePackages = resources.appendingPathComponent(
+                "runtime/site-packages"
+            )
+            environment["PYTHONHOME"] = pythonHome.path
+            environment["PYTHONPATH"] = sitePackages.path
+        }
+        process.environment = environment
+
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+        process.terminationHandler = { [weak self] task in
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            DispatchQueue.main.async {
+                if task.terminationStatus != 0 {
+                    self?.statusLabel.stringValue =
+                        (value?["error"] as? String) ?? "Update command failed"
+                }
+                completion(value)
+            }
+        }
+        do {
+            try process.run()
+        } catch {
+            statusLabel.stringValue = error.localizedDescription
+            completion(nil)
+        }
+    }
+
+    private func showUpdateError(_ message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Radio Command Center could not update"
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    @objc private func checkForUpdates() {
+        performUpdateCheck(manual: true)
+    }
+
+    private func performUpdateCheck(manual: Bool) {
+        guard !updateCheckInFlight else { return }
+        updateCheckInFlight = true
+        updateButton.isEnabled = false
+        updateButton.title = "Checking…"
+        statusLabel.stringValue = "Checking GitHub for updates…"
+
+        runUpdater(
+            [
+                "check",
+                "--current-version", applicationVersion,
+                "--repository", updateRepository,
+            ]
+        ) { [weak self] value in
+            guard let self else { return }
+            self.updateCheckInFlight = false
+            self.updateButton.isEnabled = true
+            self.updateButton.title = "Updates"
+
+            guard let value else {
+                if manual {
+                    self.showUpdateError("The update check could not be completed.")
+                }
+                self.refreshStatus()
+                return
+            }
+            if let error = value["error"] as? String {
+                if manual {
+                    self.showUpdateError(error)
+                }
+                self.refreshStatus()
+                return
+            }
+
+            let latestVersion = value["latest_version"] as? String ?? "unknown"
+            guard value["status"] as? String == "available" else {
+                self.statusLabel.stringValue =
+                    "Radio Command Center \(self.applicationVersion) is current"
+                if manual {
+                    let alert = NSAlert()
+                    alert.messageText = "You’re up to date"
+                    alert.informativeText =
+                        "Radio Command Center \(self.applicationVersion) is the newest installed version. The latest published GitHub release is \(latestVersion)."
+                    alert.addButton(withTitle: "OK")
+                    alert.runModal()
+                }
+                self.refreshStatus()
+                return
+            }
+
+            let alert = NSAlert()
+            alert.messageText = "Radio Command Center \(latestVersion) is available"
+            let releaseNotes = (value["release_notes"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let notes = releaseNotes?.isEmpty == false
+                ? "\n\n\(releaseNotes!.prefix(1800))"
+                : ""
+            alert.informativeText =
+                "The update will be verified before installation. Recordings, transcripts, profiles, credentials, and settings remain in Application Support and will not be replaced.\(notes)"
+            alert.addButton(withTitle: "Download & Install")
+            alert.addButton(withTitle: "Later")
+            if alert.runModal() == .alertFirstButtonReturn {
+                self.prepareUpdate()
+            } else {
+                self.refreshStatus()
+            }
+        }
+    }
+
+    private func prepareUpdate() {
+        updateCheckInFlight = true
+        updateButton.isEnabled = false
+        updateButton.title = "Downloading…"
+        statusLabel.stringValue = "Downloading and verifying the update…"
+
+        runUpdater(
+            [
+                "prepare",
+                "--current-version", applicationVersion,
+                "--repository", updateRepository,
+                "--app-path", Bundle.main.bundleURL.path,
+                "--data-dir", applicationDataURL.path,
+            ]
+        ) { [weak self] value in
+            guard let self else { return }
+            self.updateCheckInFlight = false
+            self.updateButton.isEnabled = true
+            self.updateButton.title = "Updates"
+
+            guard
+                let value,
+                value["error"] == nil,
+                let manifestPath = value["manifest_path"] as? String,
+                let latestVersion = value["latest_version"] as? String
+            else {
+                self.showUpdateError(
+                    (value?["error"] as? String)
+                        ?? "The update could not be downloaded and verified."
+                )
+                self.refreshStatus()
+                return
+            }
+
+            let alert = NSAlert()
+            alert.messageText = "Ready to install \(latestVersion)"
+            alert.informativeText =
+                "Radio Command Center will briefly stop its services, save a recovery copy of the database, security profiles, and settings, replace only the app, and reopen automatically."
+            alert.addButton(withTitle: "Restart & Install")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else {
+                self.refreshStatus()
+                return
+            }
+            self.installPreparedUpdate(manifestPath)
+        }
+    }
+
+    private func installPreparedUpdate(_ manifestPath: String) {
+        updateButton.isEnabled = false
+        statusLabel.stringValue = "Stopping services for the update…"
+        runControl(["stop"]) { [weak self] value in
+            guard let self else { return }
+            guard value != nil, value?["error"] == nil else {
+                self.updateButton.isEnabled = true
+                self.showUpdateError(
+                    (value?["error"] as? String)
+                        ?? "The services could not be stopped safely."
+                )
+                self.refreshStatus()
+                return
+            }
+            self.statusLabel.stringValue = "Installing update and reopening…"
+            self.runUpdater(
+                [
+                    "launch",
+                    "--manifest", manifestPath,
+                    "--current-pid", String(ProcessInfo.processInfo.processIdentifier),
+                ]
+            ) { [weak self] launchValue in
+                guard let self else { return }
+                guard launchValue?["status"] as? String == "installing" else {
+                    self.updateButton.isEnabled = true
+                    self.showUpdateError(
+                        (launchValue?["error"] as? String)
+                            ?? "The prepared update could not be started."
+                    )
+                    self.startServices()
+                    return
+                }
+                NSApp.terminate(nil)
+            }
         }
     }
 
@@ -713,6 +957,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         appHeaderToggleButton.isHidden = !isAdministrator
         if !isAdministrator {
             setAppHeaderExpanded(false, animated: false)
+        } else if !automaticUpdateChecked {
+            automaticUpdateChecked = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                self?.performUpdateCheck(manual: false)
+            }
         }
     }
 
