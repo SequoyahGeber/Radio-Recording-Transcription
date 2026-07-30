@@ -9,6 +9,10 @@ from scripts import supervisor
 
 
 class ServiceControlTests(unittest.TestCase):
+    def test_standalone_control_disables_bytecode_writes(self):
+        self.assertTrue(service_control.sys.dont_write_bytecode)
+        self.assertEqual(os.environ.get("PYTHONDONTWRITEBYTECODE"), "1")
+
     def test_status_reports_worker_state_from_supervisor(self):
         with tempfile.TemporaryDirectory() as directory:
             pid_path = os.path.join(directory, "supervisor.pid")
