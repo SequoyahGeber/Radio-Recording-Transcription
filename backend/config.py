@@ -126,6 +126,12 @@ LOG_DIR = os.path.abspath(
         SETTINGS.get("log_dir", os.path.join(DATA_DIR, "logs")),
     )
 )
+MODEL_DIR = os.path.abspath(
+    os.environ.get(
+        "RADIO_MODEL_DIR",
+        SETTINGS.get("model_dir", os.path.join(DATA_DIR, "models")),
+    )
+)
 RADIO_HOST = os.environ.get("RADIO_HOST", SETTINGS.get("host", "127.0.0.1"))
 RADIO_PORT = int(os.environ.get("RADIO_PORT", SETTINGS.get("port", 8000)))
 
@@ -136,3 +142,4 @@ os.makedirs(os.path.dirname(DB_NAME), exist_ok=True)
 os.makedirs(SECURITY_DIR, exist_ok=True)
 os.makedirs(RUNTIME_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(MODEL_DIR, exist_ok=True)

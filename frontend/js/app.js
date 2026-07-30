@@ -106,6 +106,7 @@ let lastSeenTranscriptId = 0;
 let oldestLoadedTranscriptId = null;
 let oldestLoadedRecordedAt = Number.POSITIVE_INFINITY;
 let loadingOlderTranscripts = false;
+let restoringArchiveScroll = false;
 let hasMoreHistory = true;
 let showSuspectTranscripts = false;
 let bookmarksOnly = false;
@@ -740,18 +741,19 @@ function createMessageCard(data) {
     const transcriptId = Number(data.id) || 0;
     lastSeenTranscriptId = Math.max(lastSeenTranscriptId, transcriptId);
   }
+  const cursorTime = new Date(data.recorded_at || data.timestamp || 0);
   const realTime = extractTimeFromFilename(
     data.filename,
     data.recorded_at || data.timestamp,
   );
   if (
     data.id &&
-    Number.isFinite(realTime.getTime()) &&
-    (realTime.getTime() < oldestLoadedRecordedAt ||
-      (realTime.getTime() === oldestLoadedRecordedAt &&
+    Number.isFinite(cursorTime.getTime()) &&
+    (cursorTime.getTime() < oldestLoadedRecordedAt ||
+      (cursorTime.getTime() === oldestLoadedRecordedAt &&
         Number(data.id) < Number(oldestLoadedTranscriptId)))
   ) {
-    oldestLoadedRecordedAt = realTime.getTime();
+    oldestLoadedRecordedAt = cursorTime.getTime();
     oldestLoadedTranscriptId = Number(data.id);
   }
   const hours = realTime.getHours().toString().padStart(2, "0");
@@ -797,6 +799,10 @@ function createMessageCard(data) {
   const correctionBadge = data.corrected_by
     ? `<span class="correction-badge">Corrected by ${escapeHTML(data.corrected_by)}</span>`
     : "";
+  const rescueBadge =
+    data.retry_status === "selected"
+      ? '<span class="correction-badge" title="The Medium result was replaced after a selective second pass">Large V3 rescue</span>'
+      : "";
   const actionButtons = canReview
     ? `
       <div class="message-actions">
@@ -821,7 +827,7 @@ function createMessageCard(data) {
   card.innerHTML = `
       <div class="msg-meta">
           <div class="msg-datetime"><span class="msg-date">${dateStr}</span><span class="msg-time">${timeStr}</span></div>
-          <div>${qualityBadge}${correctionBadge}${canAudio ? `<button type="button" class="audio-link" data-action="toggle-card-audio" title="Play audio recording" aria-label="Play audio recording"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 9v6h4l5 4V5L9 9H5Z"></path><path d="M17 9.5a3.5 3.5 0 0 1 0 5"></path></svg><span>Audio</span></button>` : ""}</div>
+          <div>${qualityBadge}${rescueBadge}${correctionBadge}${canAudio ? `<button type="button" class="audio-link" data-action="toggle-card-audio" title="Play audio recording" aria-label="Play audio recording"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 9v6h4l5 4V5L9 9H5Z"></path><path d="M17 9.5a3.5 3.5 0 0 1 0 5"></path></svg><span>Audio</span></button>` : ""}</div>
       </div>
       <div class="transcript-content" data-clean="${encodedCleanText}">
           ${highlightText(cleanText)}
@@ -1146,16 +1152,27 @@ async function loadArchive(options = {}) {
   updateSearchResults();
   if (options.beforeId && options.scrollPositions) {
     requestAnimationFrame(() => {
-      options.scrollPositions.forEach((position, containerId) => {
-        const container = document.getElementById(containerId);
-        if (!container) return;
-        container.scrollTop =
-          position.scrollTop + (container.scrollHeight - position.scrollHeight);
-      });
+      restoringArchiveScroll = true;
       document.querySelectorAll(".messages-container").forEach((container) => {
-        if (!options.scrollPositions.has(container.id)) {
-          container.scrollTop = container.scrollHeight;
+        const position = options.scrollPositions.get(container.id);
+        if (position) {
+          container.scrollTop =
+            position.scrollTop + (container.scrollHeight - position.scrollHeight);
+        } else {
+          const columnId = container.id.replace(/^msgs-/, "");
+          if (autoScrollState[columnId]) {
+            container.scrollTop = container.scrollHeight;
+          }
         }
+      });
+      requestAnimationFrame(() => {
+        restoringArchiveScroll = false;
+        document.querySelectorAll(".messages-container").forEach((container) => {
+          const columnId = container.id.replace(/^msgs-/, "");
+          if (autoScrollState[columnId]) {
+            container.scrollTop = container.scrollHeight;
+          }
+        });
       });
     });
   } else {
@@ -1173,7 +1190,7 @@ async function loadArchive(options = {}) {
   return rows.length;
 }
 
-async function loadOlderArchive() {
+async function loadOlderArchive(triggerContainer = null) {
   if (
     loadingOlderTranscripts ||
     !hasMoreHistory ||
@@ -1183,13 +1200,18 @@ async function loadOlderArchive() {
   }
   loadingOlderTranscripts = true;
   const scrollPositions = new Map(
-    [...document.querySelectorAll(".messages-container")].map((container) => [
-      container.id,
-      {
-        scrollHeight: container.scrollHeight,
-        scrollTop: container.scrollTop,
-      },
-    ]),
+    [...document.querySelectorAll(".messages-container")]
+      .filter((container) => {
+        const columnId = container.id.replace(/^msgs-/, "");
+        return container === triggerContainer || !autoScrollState[columnId];
+      })
+      .map((container) => [
+        container.id,
+        {
+          scrollHeight: container.scrollHeight,
+          scrollTop: container.scrollTop,
+        },
+      ]),
   );
   document.getElementById("search-status").innerText =
     "Loading older transmissions…";
@@ -1384,15 +1406,19 @@ async function refreshSystemStats() {
       `${stats.active_clients} operator${stats.active_clients === 1 ? "" : "s"}`;
     const engineLabel = stats.engine === "mlx" ? "MLX / Apple GPU" : "CPU fallback";
     document.getElementById("engine-status").innerText =
-      `${stats.model[0].toUpperCase()}${stats.model.slice(1)} model · ${engineLabel} · ${formatMetric(stats.processed)} complete · ${formatMetric(stats.suspect)} suspect`;
+      `${stats.model[0].toUpperCase()}${stats.model.slice(1)} + selective Large V3 rescue · ${engineLabel} · ${formatMetric(stats.processed)} complete · ${formatMetric(stats.suspect)} suspect`;
     const serviceStatus = document.getElementById("service-status");
     const unavailable = Object.entries(stats.services || {})
-      .filter(([, service]) => service.stale || !["online", "idle"].includes(service.status))
+      .filter(
+        ([name, service]) =>
+          !(name === "worker" && !stats.transcription_enabled) &&
+          (service.stale || !["online", "idle"].includes(service.status)),
+      )
       .map(([name]) => name);
     const serviceIssue = describeServiceIssue(stats, unavailable);
     serviceStatus.innerText =
       stats.status === "online"
-        ? `Workers healthy · ${formatMetric(stats.pending_delivery)} pending delivery`
+        ? `${stats.transcription_enabled ? "Workers healthy" : "Dashboard online · transcription paused"} · ${formatMetric(stats.pending_delivery)} pending delivery`
         : serviceIssue;
     serviceStatus.title =
       stats.status === "online"
@@ -1645,6 +1671,7 @@ document.addEventListener("change", (event) => {
 });
 
 function handleFeedScroll(container) {
+  if (restoringArchiveScroll) return;
   const columnId = container.id.replace(/^msgs-/, "");
   const distanceFromBottom =
     container.scrollHeight - container.scrollTop - container.clientHeight;
@@ -1655,7 +1682,7 @@ function handleFeedScroll(container) {
     );
     button?.classList.remove("active");
   }
-  if (container.scrollTop <= 80) loadOlderArchive();
+  if (container.scrollTop <= 80) loadOlderArchive(container);
 }
 
 document.addEventListener(
@@ -1673,7 +1700,7 @@ document.addEventListener(
   (event) => {
     const container = event.target.closest?.(".messages-container");
     if (container && event.deltaY < 0 && container.scrollTop <= 80) {
-      loadOlderArchive();
+      loadOlderArchive(container);
     }
   },
   { passive: true },

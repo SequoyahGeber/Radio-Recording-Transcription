@@ -65,7 +65,6 @@ for runtime_script in \
 do
     cp "scripts/$runtime_script" "$RUNTIME_DIR/scripts/$runtime_script"
 done
-cp -R models "$RUNTIME_DIR/models"
 cp -R "$SITE_PACKAGES_SOURCE" "$RUNTIME_DIR/site-packages"
 # mlx-whisper declares PyTorch for an optional conversion helper, but the app's
 # native MLX transcription path does not import it. Excluding it keeps the

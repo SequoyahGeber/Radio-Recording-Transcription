@@ -13,6 +13,7 @@ if SCRIPT_PROJECT_ROOT not in sys.path:
 
 from backend.config import (
     LOG_DIR,
+    MODEL_DIR,
     PROJECT_ROOT,
     RADIO_HOST,
     RADIO_PORT,
@@ -210,7 +211,13 @@ def main():
     environment.setdefault("PYTHONUNBUFFERED", "1")
     environment.setdefault("RADIO_TRANSCRIPTION_ENGINE", "mlx")
     environment.setdefault("RADIO_MODEL_SIZE", "medium")
-    environment.setdefault("HF_HOME", os.path.join(PROJECT_ROOT, "models", "hf-mlx"))
+    environment.setdefault("RADIO_MODEL_DIR", MODEL_DIR)
+    environment.setdefault("HF_HOME", os.path.join(MODEL_DIR, "hf-mlx"))
+    environment.setdefault("RADIO_MLX_MODEL", "mlx-community/whisper-medium-mlx")
+    environment.setdefault(
+        "RADIO_RETRY_MLX_MODEL",
+        "mlx-community/whisper-large-v3-mlx",
+    )
     worker_host = "127.0.0.1" if RADIO_HOST in {"0.0.0.0", "::"} else RADIO_HOST
     environment.setdefault(
         "RADIO_SERVER_URL",

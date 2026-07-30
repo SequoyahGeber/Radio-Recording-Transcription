@@ -349,6 +349,59 @@ class ApiIntegrationTests(unittest.TestCase):
                 )
                 connection.commit()
 
+    def test_archive_cursor_falls_back_to_import_time_for_legacy_rows(self):
+        filenames = [
+            f"Legacy/legacy-pagination-{index}.mp3"
+            for index in range(3)
+        ]
+        try:
+            with connect() as connection:
+                connection.executemany(
+                    """
+                    INSERT INTO transcripts(
+                        timestamp, recorded_at, filename, transcript_text,
+                        raw_transcript_text, quality_score, quality_reason, status
+                    ) VALUES (?, NULL, ?, ?, ?, 1.0, '', 'ready')
+                    """,
+                    [
+                        (
+                            f"2026-07-20T10:0{index}:00",
+                            filename,
+                            f"legacy-cursor-marker {index}",
+                            f"legacy-cursor-marker {index}",
+                        )
+                        for index, filename in enumerate(filenames)
+                    ],
+                )
+                connection.commit()
+
+            recent = self.client.get(
+                "/api/history",
+                params={"q": "legacy-cursor-marker", "limit": 2},
+            ).json()
+            older = self.client.get(
+                "/api/history",
+                params={
+                    "q": "legacy-cursor-marker",
+                    "limit": 2,
+                    "before_id": recent[0]["id"],
+                },
+            ).json()
+            self.assertEqual(len(recent), 2)
+            self.assertEqual(len(older), 1)
+            self.assertTrue(
+                {row["id"] for row in recent}.isdisjoint(
+                    {row["id"] for row in older}
+                )
+            )
+        finally:
+            with connect() as connection:
+                connection.executemany(
+                    "DELETE FROM transcripts WHERE filename = ?",
+                    [(filename,) for filename in filenames],
+                )
+                connection.commit()
+
     def test_console_returns_whitelisted_service_log_tail(self):
         os.makedirs(LOG_DIR, exist_ok=True)
         server_log = os.path.join(LOG_DIR, "server.log")

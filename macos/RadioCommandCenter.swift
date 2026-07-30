@@ -308,9 +308,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             environment["PYTHONHOME"] = pythonHome.path
             environment["PYTHONPATH"] = sitePackages.path
             environment["RADIO_MODEL_DIR"] =
-                projectRoot.appendingPathComponent("models").path
+                applicationDataURL.appendingPathComponent("models").path
             environment["HF_HOME"] =
-                projectRoot.appendingPathComponent("models/hf-mlx").path
+                applicationDataURL.appendingPathComponent("models/hf-mlx").path
         }
         process.environment = environment
         let output = Pipe()
@@ -969,7 +969,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let enable = !transcriptionEnabled
         transcriptionButton.isEnabled = false
         statusLabel.stringValue = enable
-            ? "Starting transcription…"
+            ? "Preparing Medium model… first use downloads it once"
             : "Stopping transcription…"
         let action = enable ? "transcription-start" : "transcription-stop"
         runControl([action]) { [weak self] value in

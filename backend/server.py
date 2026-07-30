@@ -25,6 +25,7 @@ from backend.config import (
     PROJECT_ROOT,
     RADIO_HOST,
     RECORDING_SOURCE_DIR,
+    load_settings,
 )
 from backend.database import audit, connect, initialize_database
 from backend.security import (
@@ -326,7 +327,12 @@ def build_stats():
     rate_per_minute = recent_count / 15
     eta_minutes = backlog / rate_per_minute if rate_per_minute > 0 else None
     heartbeats = read_heartbeats()
-    required_services = ("worker", "sync")
+    transcription_enabled = bool(
+        load_settings().get("transcription_enabled", True)
+    )
+    required_services = (
+        ("worker", "sync") if transcription_enabled else ("sync",)
+    )
     degraded = any(
         name not in heartbeats
         or heartbeats[name]["stale"]
@@ -337,6 +343,8 @@ def build_stats():
         "status": "degraded" if degraded else "online",
         "active_clients": len(manager.active_connections),
         "model": RADIO_MODEL_SIZE,
+        "retry_model": "large-v3",
+        "transcription_enabled": transcription_enabled,
         "engine": RADIO_ENGINE,
         "recordings": total_audio,
         "processed": processed,
@@ -368,6 +376,8 @@ def transcript_row_to_dict(row):
         "notes": row["notes"] or "",
         "corrected_by": row["corrected_by"],
         "corrected_at": row["corrected_at"],
+        "transcription_model": row["transcription_model"],
+        "retry_status": row["retry_status"],
     }
 
 
@@ -393,12 +403,14 @@ def query_transcripts(
         clauses.append(
             """
             (
-                recorded_at < (
-                    SELECT recorded_at FROM transcripts WHERE id = ?
+                coalesce(recorded_at, timestamp) < (
+                    SELECT coalesce(recorded_at, timestamp)
+                    FROM transcripts WHERE id = ?
                 )
                 OR (
-                    recorded_at = (
-                        SELECT recorded_at FROM transcripts WHERE id = ?
+                    coalesce(recorded_at, timestamp) = (
+                        SELECT coalesce(recorded_at, timestamp)
+                        FROM transcripts WHERE id = ?
                     )
                     AND id < ?
                 )
@@ -439,13 +451,14 @@ def query_transcripts(
     order_by = (
         "id ASC"
         if after_id is not None
-        else "recorded_at DESC, id DESC"
+        else "coalesce(recorded_at, timestamp) DESC, id DESC"
     )
     parameters.append(max(1, min(limit, 2000)))
     sql = f"""
         SELECT id, timestamp, recorded_at, filename, transcript_text,
                quality_score, quality_reason, status, reviewed, bookmarked,
-               notes, corrected_by, corrected_at
+               notes, corrected_by, corrected_at, transcription_model,
+               retry_status
         FROM transcripts
         WHERE {' AND '.join(clauses)}
         ORDER BY {order_by}
@@ -793,7 +806,8 @@ def update_transcript(
             """
             SELECT id, timestamp, recorded_at, filename, transcript_text,
                    quality_score, quality_reason, status, reviewed, bookmarked,
-                   notes, corrected_by, corrected_at
+                   notes, corrected_by, corrected_at, transcription_model,
+                   retry_status
             FROM transcripts WHERE id = ?
             """,
             (transcript_id,),

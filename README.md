@@ -90,13 +90,31 @@ take precedence:
 - `RADIO_PORT`
 - `RADIO_RECORDING_YEAR`
 - `RADIO_MODEL_SIZE`
+- `RADIO_MODEL_DIR`
+- `RADIO_RETRY_MAX_DURATION_SECONDS`
+- `RADIO_RESCUE_BACKLOG_LIMIT`
 - `RADIO_TRANSCRIPTION_ENGINE`
 - `RADIO_SYNC_BATCH_SIZE`
 - `RADIO_SYNC_VERIFY_SHA256`
 - `RADIO_SYNC_MIN_FREE_BYTES`
 
-Runtime data, recordings, databases, models, logs, settings, and credentials
+Runtime data, recordings, databases, downloaded models, logs, settings, and credentials
 remain excluded from source control.
+
+## Transcription models
+
+The application and DMG do not bundle Whisper model weights. The first time an
+administrator chooses **Start Transcription**, the Medium MLX model downloads
+once into `~/Library/Application Support/Radio Command Center/models`. If that
+download fails, transcription remains off and the dashboard and sync services
+continue running.
+
+Medium handles the normal first pass. Transcripts flagged by decoder confidence,
+excessive repetition, or the quality filter can receive a lower-priority second
+pass with Large V3. Large V3 downloads only when the first eligible rescue is
+needed. The retry text and quality measurements are retained; it replaces the
+Medium text only when the retry is usable and clearly better. Blank audio and
+recordings longer than three minutes skip the expensive retry by default.
 
 ## App updates
 
@@ -123,8 +141,9 @@ DMG, drag it to **Applications** before updating.
 ## Deployment
 
 Radio Command Center uses one administrator Mac as the transcription host. The
-packaged DMG provides a drag-and-drop application containing its Python runtime,
-transcription dependencies, and MLX model. After the one-time administrator
+packaged DMG provides a drag-and-drop application containing its Python runtime
+and transcription dependencies. Model weights download on demand after
+installation rather than inflating every DMG. After the one-time administrator
 setup, opening the app is a one-click daily launch.
 
 Viewer, operator, and supervisor profiles do not need the transcription
@@ -154,9 +173,14 @@ DMG filename, bundle version, and release tag must match exactly.
 
 Service logs can be viewed from **Console** by the administrator. The native
 app can restart all services or control the transcription worker independently.
+Stopping transcription leaves the dashboard and recording sync online.
 Transcripts are committed before dashboard delivery, so a web-server outage
 does not lose results. The dashboard catches up from its last seen database ID
 after reconnecting.
+
+Each feed initially loads the newest archive page. Scrolling one feed upward
+loads the next older page while preserving that feed's position; other columns
+that are still following live traffic remain pinned to their newest message.
 
 The sync worker stops copying before the configured free-space reserve is
 crossed and reports the condition as degraded. Recordings are never deleted

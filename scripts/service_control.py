@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import platform
 import signal
 import subprocess
 import sys
@@ -11,13 +12,36 @@ SCRIPT_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_PROJECT_ROOT not in sys.path:
     sys.path.insert(0, SCRIPT_PROJECT_ROOT)
 
+# A packaged control command can also be run from Terminal or by the updater,
+# outside the Swift launcher that normally supplies PYTHONPATH. Reattach the
+# bundled dependencies before importing the backend or spawning the supervisor.
+BUNDLED_SITE_PACKAGES = os.path.join(SCRIPT_PROJECT_ROOT, "site-packages")
+if os.path.isdir(BUNDLED_SITE_PACKAGES):
+    if BUNDLED_SITE_PACKAGES not in sys.path:
+        sys.path.insert(0, BUNDLED_SITE_PACKAGES)
+    existing_python_path = os.environ.get("PYTHONPATH", "")
+    python_path_parts = [
+        part for part in existing_python_path.split(os.pathsep) if part
+    ]
+    if BUNDLED_SITE_PACKAGES not in python_path_parts:
+        os.environ["PYTHONPATH"] = os.pathsep.join(
+            [BUNDLED_SITE_PACKAGES, *python_path_parts]
+        )
+
 from backend.config import (
+    MODEL_DIR,
     PROJECT_ROOT,
     RADIO_HOST,
     RADIO_PORT,
     RUNTIME_DIR,
     load_settings,
     save_settings,
+)
+from backend.model_manager import (
+    PRIMARY_MLX_MODEL,
+    RETRY_MLX_MODEL,
+    ensure_model,
+    model_is_cached,
 )
 
 
@@ -65,6 +89,10 @@ def status():
         "pid": pid if running else None,
         "transcription_enabled": transcription_enabled,
         "transcription_running": transcription_running,
+        "primary_model": PRIMARY_MLX_MODEL,
+        "primary_model_cached": model_is_cached(PRIMARY_MLX_MODEL, MODEL_DIR),
+        "retry_model": RETRY_MLX_MODEL,
+        "retry_model_cached": model_is_cached(RETRY_MLX_MODEL, MODEL_DIR),
         "host": RADIO_HOST,
         "port": RADIO_PORT,
         "dashboard": f"https://{dashboard_host}:{RADIO_PORT}",
@@ -113,6 +141,13 @@ def stop():
 
 
 def set_transcription(enabled):
+    if (
+        enabled
+        and os.environ.get("RADIO_TRANSCRIPTION_ENGINE", "mlx").lower() == "mlx"
+        and platform.system() == "Darwin"
+        and platform.machine() == "arm64"
+    ):
+        ensure_model(PRIMARY_MLX_MODEL, MODEL_DIR)
     save_settings({"transcription_enabled": enabled})
     if enabled and not status()["running"]:
         start()

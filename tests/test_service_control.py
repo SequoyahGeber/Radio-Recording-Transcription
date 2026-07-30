@@ -58,6 +58,49 @@ class ServiceControlTests(unittest.TestCase):
         self.assertTrue(result["running"])
         self.assertFalse(result["transcription_running"])
 
+    def test_enabling_transcription_downloads_medium_before_persisting(self):
+        running_status = {
+            "running": True,
+            "transcription_enabled": True,
+            "transcription_running": True,
+        }
+        calls = []
+        with (
+            mock.patch.object(service_control.platform, "system", return_value="Darwin"),
+            mock.patch.object(service_control.platform, "machine", return_value="arm64"),
+            mock.patch.object(
+                service_control,
+                "ensure_model",
+                side_effect=lambda *args: calls.append("model"),
+            ),
+            mock.patch.object(
+                service_control,
+                "save_settings",
+                side_effect=lambda *args: calls.append("settings"),
+            ),
+            mock.patch.object(service_control, "status", return_value=running_status),
+        ):
+            result = service_control.set_transcription(True)
+
+        self.assertEqual(calls, ["model", "settings"])
+        self.assertTrue(result["transcription_running"])
+
+    def test_failed_model_download_does_not_enable_transcription(self):
+        with (
+            mock.patch.object(service_control.platform, "system", return_value="Darwin"),
+            mock.patch.object(service_control.platform, "machine", return_value="arm64"),
+            mock.patch.object(
+                service_control,
+                "ensure_model",
+                side_effect=RuntimeError("download failed"),
+            ),
+            mock.patch.object(service_control, "save_settings") as save_settings,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "download failed"):
+                service_control.set_transcription(True)
+
+        save_settings.assert_not_called()
+
 
 class ManagedProcessTests(unittest.TestCase):
     def test_disabled_process_is_stopped_and_can_start_cleanly_later(self):

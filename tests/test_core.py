@@ -22,7 +22,11 @@ os.environ["RADIO_DB_PATH"] = os.path.join(DATA_DIR, "test.db")
 os.environ["RADIO_RECORDING_YEAR"] = "2026"
 
 from backend.database import connect, initialize_database
-from backend.transcript_quality import assess_transcript
+from backend.transcript_quality import (
+    assess_transcript,
+    choose_retry_result,
+    should_retry_with_larger_model,
+)
 import sync
 
 
@@ -51,6 +55,46 @@ class TranscriptQualityTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "ready")
 
+    def test_suspect_transcript_is_eligible_for_large_v3_rescue(self):
+        quality = assess_transcript("hello hello hello hello hello hello", 12)
+        self.assertTrue(should_retry_with_larger_model(quality, 12))
+
+    def test_blank_or_very_long_recording_skips_large_v3_rescue(self):
+        self.assertFalse(
+            should_retry_with_larger_model(assess_transcript("[silence]", 5), 5)
+        )
+        quality = assess_transcript("ordinary radio traffic", 240)
+        self.assertFalse(should_retry_with_larger_model(quality, 240))
+
+    def test_ready_large_v3_result_can_replace_suspect_medium_result(self):
+        primary = assess_transcript("hello hello hello hello hello hello", 12)
+        retry = assess_transcript(
+            "Security team proceed to the north entrance for a medical call",
+            12,
+        )
+        text, quality, used_retry = choose_retry_result(
+            "hello hello hello hello hello hello",
+            primary,
+            "Security team proceed to the north entrance for a medical call",
+            retry,
+        )
+        self.assertTrue(used_retry)
+        self.assertEqual(quality["status"], "ready")
+        self.assertIn("north entrance", text)
+
+    def test_blank_large_v3_result_never_replaces_medium_result(self):
+        primary_text = "Security team proceed to the north entrance"
+        primary = assess_transcript(primary_text, 8)
+        retry = assess_transcript("", 8)
+        text, _, used_retry = choose_retry_result(
+            primary_text,
+            primary,
+            "",
+            retry,
+        )
+        self.assertFalse(used_retry)
+        self.assertEqual(text, primary_text)
+
 
 class DatabaseMigrationTests(unittest.TestCase):
     def test_schema_contains_reliability_and_review_fields(self):
@@ -67,6 +111,10 @@ class DatabaseMigrationTests(unittest.TestCase):
                 "reviewed",
                 "bookmarked",
                 "notes",
+                "transcription_model",
+                "retry_transcript_text",
+                "retry_model",
+                "retry_status",
             }.issubset(columns)
         )
 

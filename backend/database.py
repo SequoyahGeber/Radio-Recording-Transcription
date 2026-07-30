@@ -21,6 +21,14 @@ TRANSCRIPT_COLUMNS = {
     "notes": "TEXT NOT NULL DEFAULT ''",
     "corrected_by": "TEXT",
     "corrected_at": "TEXT",
+    "transcription_model": "TEXT",
+    "retry_transcript_text": "TEXT",
+    "retry_model": "TEXT",
+    "retry_quality_score": "REAL",
+    "retry_quality_reason": "TEXT",
+    "retry_quality_metrics": "TEXT",
+    "retry_status": "TEXT",
+    "retry_attempted_at": "TEXT",
 }
 
 

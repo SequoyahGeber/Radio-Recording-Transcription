@@ -9,7 +9,6 @@ echo "  RADIO COMMAND CENTER - INSTALLER"
 echo "========================================"
 
 echo "[1/5] Preparing local build resources..."
-mkdir -p models
 
 echo "[2/5] Creating Python Virtual Environment..."
 PYTHON_BIN="${RADIO_PYTHON:-}"

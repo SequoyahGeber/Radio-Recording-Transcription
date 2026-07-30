@@ -122,3 +122,41 @@ def assess_transcript(text, audio_duration=None, engine_metrics=None):
 
 def has_meaningful_transcript(text):
     return assess_transcript(text)["status"] != "blank"
+
+
+def should_retry_with_larger_model(quality, audio_duration=None, max_duration=180):
+    if not quality or quality.get("status") == "blank":
+        return False
+    if audio_duration is not None and audio_duration > max_duration:
+        return False
+
+    metrics = quality.get("metrics") or {}
+    no_speech_probability = metrics.get("no_speech_prob")
+    if no_speech_probability is not None and no_speech_probability > 0.9:
+        return False
+    if quality.get("status") == "suspect":
+        return True
+    if float(quality.get("score", 1.0)) < 0.7:
+        return True
+
+    average_log_probability = metrics.get("avg_logprob")
+    if average_log_probability is not None and average_log_probability < -0.75:
+        return True
+    compression_ratio = metrics.get("compression_ratio")
+    return compression_ratio is not None and compression_ratio > 2.2
+
+
+def choose_retry_result(primary_text, primary_quality, retry_text, retry_quality):
+    primary_score = float(primary_quality.get("score", 0.0))
+    retry_score = float(retry_quality.get("score", 0.0))
+    retry_is_usable = bool((retry_text or "").strip()) and retry_quality.get("status") != "blank"
+    use_retry = retry_is_usable and (
+        retry_quality.get("status") == "ready"
+        and (
+            primary_quality.get("status") != "ready"
+            or retry_score >= primary_score + 0.15
+        )
+    )
+    if use_retry:
+        return retry_text, retry_quality, True
+    return primary_text, primary_quality, False
