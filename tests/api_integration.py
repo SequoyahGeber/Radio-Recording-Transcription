@@ -124,9 +124,22 @@ class ApiIntegrationTests(unittest.TestCase):
         )
 
         transcript_id = self.client.get("/api/history").json()[0]["id"]
+        version = self.client.get(f"/api/transcripts/{transcript_id}").json()["version"]
+        self.assertEqual(
+            self.client.patch(
+                f"/api/transcripts/{transcript_id}",
+                json={"bookmarked": True},
+            ).status_code,
+            428,
+        )
         update = self.client.patch(
             f"/api/transcripts/{transcript_id}",
-            json={"reviewed": True, "bookmarked": True, "notes": "Incident reviewed"},
+            json={
+                "reviewed": True,
+                "bookmarked": True,
+                "notes": "Incident reviewed",
+                "version": version,
+            },
         )
         self.assertEqual(update.status_code, 200)
         self.assertTrue(update.json()["reviewed"])
@@ -580,22 +593,386 @@ class ApiIntegrationTests(unittest.TestCase):
             save_security_config(original_config)
 
     def test_internal_delivery_requires_private_token(self):
-        payload = {
-            "id": 99,
-            "filename": "Alpha/test.mp3",
-            "transcript_text": "test transmission",
-            "timestamp": "2026-07-25T10:00:00",
-            "status": "ready",
-        }
+        with connect(read_only=True) as connection:
+            row = connection.execute(
+                """
+                SELECT id, filename, transcript_text, timestamp, recorded_at,
+                       quality_score, quality_reason, status
+                FROM transcripts
+                WHERE filename = 'Alpha/2026-07-25-09-59-55-Alpha.mp3'
+                """
+            ).fetchone()
+        payload = dict(row)
         self.assertEqual(self.client.post("/api/new_transcript", json=payload).status_code, 403)
-        self.assertEqual(
-            self.client.post(
-                "/api/new_transcript",
-                json=payload,
-                headers={"X-Radio-Internal-Token": "test-internal-token"},
-            ).status_code,
-            200,
+        delivered = self.client.post(
+            "/api/new_transcript",
+            json=payload,
+            headers={"X-Radio-Internal-Token": "test-internal-token"},
         )
+        self.assertEqual(delivered.status_code, 200)
+        self.assertIn("event_id", delivered.json())
+
+    def test_phase_four_alert_rules_inbox_events_and_preferences(self):
+        filename = "Medical/2026-07-30-16-00-00-phase-four-alert.mp3"
+        original_config = load_security_config()
+        operator = TestClient(app, base_url="https://127.0.0.1")
+        rule_id = None
+        transcript_id = None
+        try:
+            created_rule = self.client.post(
+                "/api/alert-rules",
+                json={
+                    "name": "Phase Four Distress Beacon",
+                    "description": "Integration-only alert rule",
+                    "severity": "critical",
+                    "match_mode": "phrase",
+                    "terms": ["phase four distress beacon"],
+                    "exclusions": ["training"],
+                    "channels": ["Medical"],
+                    "minimum_quality": 0.5,
+                    "cooldown_seconds": 0,
+                    "requires_ack": True,
+                    "escalation_seconds": 60,
+                    "active": True,
+                },
+            )
+            self.assertEqual(created_rule.status_code, 200)
+            rule = created_rule.json()
+            rule_id = rule["id"]
+
+            test_match = self.client.post(
+                f"/api/alert-rules/{rule_id}/test",
+                json={
+                    "transcript_text": "Phase four distress beacon at the west gate",
+                    "channel": "Medical",
+                    "quality_score": 0.95,
+                },
+            )
+            self.assertEqual(test_match.status_code, 200)
+            self.assertTrue(test_match.json()["matched"])
+            excluded = self.client.post(
+                f"/api/alert-rules/{rule_id}/test",
+                json={
+                    "transcript_text": "Phase four distress beacon training only",
+                    "channel": "Medical",
+                    "quality_score": 0.95,
+                },
+            )
+            self.assertFalse(excluded.json()["matched"])
+
+            with connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO transcripts(
+                        timestamp, recorded_at, recording_year, channel,
+                        filename, transcript_text, raw_transcript_text,
+                        quality_score, quality_reason, status
+                    ) VALUES (?, ?, 2026, 'Medical', ?, ?, ?, 0.95, '', 'ready')
+                    """,
+                    (
+                        "2026-07-30T16:00:05",
+                        "2026-07-30T16:00:00",
+                        filename,
+                        "Phase four distress beacon at the west gate",
+                        "Phase four distress beacon at the west gate",
+                    ),
+                )
+                transcript_id = cursor.lastrowid
+                connection.commit()
+            delivery_payload = {
+                "id": transcript_id,
+                "filename": filename,
+                "transcript_text": "Phase four distress beacon at the west gate",
+                "timestamp": "2026-07-30T16:00:05",
+                "recorded_at": "2026-07-30T16:00:00",
+                "quality_score": 0.95,
+                "quality_reason": "",
+                "status": "ready",
+            }
+            delivered = self.client.post(
+                "/api/new_transcript",
+                json=delivery_payload,
+                headers={"X-Radio-Internal-Token": "test-internal-token"},
+            )
+            self.assertEqual(delivered.status_code, 200)
+            self.assertEqual(delivered.json()["alerts_created"], 1)
+            repeated = self.client.post(
+                "/api/new_transcript",
+                json=delivery_payload,
+                headers={"X-Radio-Internal-Token": "test-internal-token"},
+            )
+            self.assertTrue(repeated.json()["duplicate"])
+            self.assertEqual(repeated.json()["alerts_created"], 0)
+
+            inbox = self.client.get(
+                "/api/alerts",
+                params={"status": "all"},
+            )
+            self.assertEqual(inbox.status_code, 200)
+            alert = next(
+                item
+                for item in inbox.json()["items"]
+                if item["rule_id"] == rule_id
+                and item["transcript_id"] == transcript_id
+            )
+            self.assertEqual(alert["severity"], "critical")
+            self.assertEqual(alert["status"], "open")
+            self.assertIn("Phase Four Distress Beacon", alert["explanation"])
+
+            self.assertEqual(
+                self.client.post(
+                    "/api/users",
+                    json={
+                        "username": "phase-four-alert-operator",
+                        "display_name": "Alert Operator",
+                        "role": "operator",
+                        "password": "phase-four-alert-password",
+                        "active": True,
+                    },
+                ).status_code,
+                200,
+            )
+            self.assertEqual(
+                operator.post(
+                    "/api/login",
+                    json={
+                        "username": "phase-four-alert-operator",
+                        "password": "phase-four-alert-password",
+                    },
+                ).status_code,
+                200,
+            )
+            self.assertEqual(
+                operator.patch(
+                    f"/api/alerts/{alert['id']}",
+                    json={
+                        "status": "false_positive",
+                        "version": alert["version"],
+                    },
+                ).status_code,
+                403,
+            )
+
+            acknowledged = self.client.patch(
+                f"/api/alerts/{alert['id']}",
+                json={"status": "acknowledged", "version": alert["version"]},
+            )
+            self.assertEqual(acknowledged.status_code, 200)
+            self.assertEqual(acknowledged.json()["acknowledged_by"], "admin")
+            stale = self.client.patch(
+                f"/api/alerts/{alert['id']}",
+                json={"status": "resolved", "version": alert["version"]},
+            )
+            self.assertEqual(stale.status_code, 409)
+            resolved = self.client.patch(
+                f"/api/alerts/{alert['id']}",
+                json={
+                    "status": "resolved",
+                    "resolution_note": "Response complete",
+                    "version": acknowledged.json()["version"],
+                },
+            )
+            self.assertEqual(resolved.status_code, 200)
+            self.assertEqual(resolved.json()["status"], "resolved")
+
+            events = self.client.get("/api/events", params={"after_id": 0})
+            self.assertEqual(events.status_code, 200)
+            event_types = {item["type"] for item in events.json()["items"]}
+            self.assertTrue(
+                {
+                    "alert_rule.created",
+                    "transcript.created",
+                    "alert.created",
+                    "alert.updated",
+                }.issubset(event_types)
+            )
+
+            preferences = self.client.put(
+                "/api/notification-preferences",
+                json={
+                    "configuration": {
+                        "browser_enabled": True,
+                        "minimum_severity": "urgent",
+                        "sound_enabled": False,
+                    }
+                },
+            )
+            self.assertEqual(preferences.status_code, 200)
+            self.assertEqual(
+                self.client.get("/api/notification-preferences")
+                .json()["configuration"]["minimum_severity"],
+                "urgent",
+            )
+            self.assertEqual(
+                self.client.put(
+                    "/api/notification-preferences",
+                    json={"configuration": {"unknown": True}},
+                ).status_code,
+                400,
+            )
+        finally:
+            operator.close()
+            save_security_config(original_config)
+            with connect() as connection:
+                if transcript_id is not None:
+                    alert_ids = [
+                        row["id"]
+                        for row in connection.execute(
+                            "SELECT id FROM alert_events WHERE transcript_id = ?",
+                            (transcript_id,),
+                        ).fetchall()
+                    ]
+                    for alert_id in alert_ids:
+                        connection.execute(
+                            "DELETE FROM alert_acknowledgements WHERE alert_id = ?",
+                            (alert_id,),
+                        )
+                    connection.execute(
+                        "DELETE FROM alert_events WHERE transcript_id = ?",
+                        (transcript_id,),
+                    )
+                    connection.execute(
+                        "DELETE FROM transcripts WHERE id = ?",
+                        (transcript_id,),
+                    )
+                if rule_id is not None:
+                    connection.execute(
+                        "DELETE FROM alert_rules WHERE id = ?",
+                        (rule_id,),
+                    )
+                connection.commit()
+
+    def test_phase_four_unique_presence_and_live_mutation_replay(self):
+        original_config = load_security_config()
+        filename = "Operations/2026-07-30-17-00-00-live-collaboration.mp3"
+        transcript_id = None
+        operator = TestClient(app, base_url="https://127.0.0.1")
+
+        def receive_type(socket, event_type, attempts=20):
+            for _ in range(attempts):
+                event = socket.receive_json()
+                if event.get("type") == event_type:
+                    return event
+            self.fail(f"Did not receive {event_type}")
+
+        try:
+            self.assertEqual(
+                self.client.post(
+                    "/api/users",
+                    json={
+                        "username": "phase-four-operator",
+                        "display_name": "Phase Four Operator",
+                        "role": "operator",
+                        "password": "phase-four-password",
+                        "active": True,
+                    },
+                ).status_code,
+                200,
+            )
+            self.assertEqual(
+                operator.post(
+                    "/api/login",
+                    json={
+                        "username": "phase-four-operator",
+                        "password": "phase-four-password",
+                    },
+                ).status_code,
+                200,
+            )
+            with connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO transcripts(
+                        timestamp, recorded_at, recording_year, channel,
+                        filename, transcript_text, raw_transcript_text,
+                        quality_score, quality_reason, status
+                    ) VALUES (
+                        '2026-07-30T17:00:05', '2026-07-30T17:00:00',
+                        2026, 'Operations', ?, 'routine collaboration marker',
+                        'routine collaboration marker', 1.0, '', 'ready'
+                    )
+                    """,
+                    (filename,),
+                )
+                transcript_id = cursor.lastrowid
+                high_watermark = connection.execute(
+                    "SELECT coalesce(max(id), 0) FROM events"
+                ).fetchone()[0]
+                connection.commit()
+
+            with self.client.websocket_connect(
+                f"wss://127.0.0.1/ws?after_event_id={high_watermark}"
+            ) as admin_socket:
+                first_presence = receive_type(admin_socket, "presence.changed")
+                self.assertEqual(first_presence["payload"]["active_users"], 1)
+                with operator.websocket_connect(
+                    f"wss://127.0.0.1/ws?after_event_id={high_watermark}"
+                ) as operator_socket:
+                    operator_presence = receive_type(
+                        operator_socket,
+                        "presence.changed",
+                    )
+                    self.assertEqual(
+                        operator_presence["payload"]["active_users"],
+                        2,
+                    )
+                    presence = self.client.get("/api/presence").json()
+                    self.assertEqual(presence["active_users"], 2)
+                    self.assertEqual(len(presence["users"]), 2)
+
+                    detail = self.client.get(
+                        f"/api/transcripts/{transcript_id}"
+                    ).json()
+                    update = self.client.patch(
+                        f"/api/transcripts/{transcript_id}",
+                        json={
+                            "notes": "shared live mutation",
+                            "version": detail["version"],
+                        },
+                    )
+                    self.assertEqual(update.status_code, 200)
+                    admin_event = receive_type(
+                        admin_socket,
+                        "transcript.updated",
+                    )
+                    operator_event = receive_type(
+                        operator_socket,
+                        "transcript.updated",
+                    )
+                    self.assertEqual(
+                        admin_event["payload"]["transcript"]["notes"],
+                        "shared live mutation",
+                    )
+                    self.assertEqual(
+                        operator_event["event_id"],
+                        admin_event["event_id"],
+                    )
+
+            replay = operator.get(
+                "/api/events",
+                params={"after_id": high_watermark},
+            )
+            replayed = [
+                event
+                for event in replay.json()["items"]
+                if event["type"] == "transcript.updated"
+                and event["resource_id"] == transcript_id
+            ]
+            self.assertEqual(len(replayed), 1)
+        finally:
+            operator.close()
+            save_security_config(original_config)
+            if transcript_id is not None:
+                with connect() as connection:
+                    connection.execute(
+                        "DELETE FROM transcript_versions WHERE transcript_id = ?",
+                        (transcript_id,),
+                    )
+                    connection.execute(
+                        "DELETE FROM transcripts WHERE id = ?",
+                        (transcript_id,),
+                    )
+                    connection.commit()
 
     def test_archive_loads_recent_page_then_older_page_without_overlap(self):
         filenames = [f"Paging/pagination-{index:03d}.mp3" for index in range(125)]

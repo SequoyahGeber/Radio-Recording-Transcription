@@ -21,9 +21,18 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from backend.alerts import (
+    ALERT_MATCH_MODES,
+    ALERT_SEVERITIES,
+    ALERT_STATUSES,
+    alert_row_to_dict,
+    evaluate_transcript_alerts,
+    rule_matches,
+    rule_row_to_dict,
+)
 from backend.config import (
     AUDIO_DIR,
     DB_NAME,
@@ -34,6 +43,7 @@ from backend.config import (
     load_settings,
 )
 from backend.database import audit, connect, initialize_database
+from backend.events import record_event, replay_events
 from backend.security import (
     SESSION_COOKIE,
     SESSION_SECONDS,
@@ -81,20 +91,52 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: List[WebSocket] = []
+        self.connections = {}
 
-    async def connect(self, websocket: WebSocket):
+    @property
+    def active_connections(self):
+        return list(self.connections)
+
+    @property
+    def active_user_count(self):
+        return len({details["username"] for details in self.connections.values()})
+
+    def presence_payload(self):
+        usernames = {details["username"] for details in self.connections.values()}
+        return {
+            "event_id": None,
+            "type": "presence.changed",
+            "resource_type": "presence",
+            "resource_id": None,
+            "actor": None,
+            "payload": {
+                "active_users": len(usernames),
+                "active_connections": len(self.connections),
+            },
+            "created_at": datetime.now().isoformat(),
+        }
+
+    async def connect(self, websocket: WebSocket, session):
         await websocket.accept()
-        self.active_connections.append(websocket)
+        self.connections[websocket] = {
+            "username": session["u"],
+            "display_name": session.get("display_name", session["u"]),
+            "role": session["r"],
+            "connected_at": datetime.now().isoformat(),
+            "last_seen": datetime.now().isoformat(),
+        }
 
     def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
+        self.connections.pop(websocket, None)
+
+    def touch(self, websocket: WebSocket):
+        if websocket in self.connections:
+            self.connections[websocket]["last_seen"] = datetime.now().isoformat()
 
     async def broadcast(self, payload):
         message = json.dumps(payload)
         dead_connections = []
-        for connection in list(self.active_connections):
+        for connection in list(self.connections):
             try:
                 await connection.send_text(message)
             except Exception as exc:
@@ -102,6 +144,9 @@ class ConnectionManager:
                 dead_connections.append(connection)
         for connection in dead_connections:
             self.disconnect(connection)
+
+    async def broadcast_presence(self):
+        await self.broadcast(self.presence_payload())
 
 
 manager = ConnectionManager()
@@ -170,6 +215,43 @@ class SavedSearchPayload(BaseModel):
     configuration: dict
 
 
+class AlertRulePayload(BaseModel):
+    name: str
+    description: str = ""
+    severity: str = "caution"
+    match_mode: str = "whole_word"
+    terms: List[str]
+    exclusions: List[str] = Field(default_factory=list)
+    channels: List[str] = Field(default_factory=list)
+    start_time: str = ""
+    end_time: str = ""
+    minimum_quality: float = 0.0
+    cooldown_seconds: int = 60
+    sound: str = ""
+    requires_ack: bool = False
+    escalation_seconds: int = 0
+    active: bool = True
+    version: Optional[int] = None
+
+
+class AlertUpdatePayload(BaseModel):
+    status: Optional[str] = None
+    assigned_to: Optional[str] = None
+    resolution_note: Optional[str] = None
+    version: int
+
+
+class AlertTestPayload(BaseModel):
+    transcript_text: str
+    channel: str = ""
+    quality_score: float = 1.0
+    recorded_at: Optional[str] = None
+
+
+class NotificationPreferencesPayload(BaseModel):
+    configuration: dict
+
+
 class UserPayload(BaseModel):
     username: str
     display_name: str = ""
@@ -211,6 +293,22 @@ PREFERENCE_ALLOWED_KEYS = {
     "last_workspace_id",
 }
 SAVED_SEARCH_ALLOWED_KEYS = {"query", "filters", "sort"}
+NOTIFICATION_PREFERENCE_ALLOWED_KEYS = {
+    "browser_enabled",
+    "minimum_severity",
+    "sound_enabled",
+    "critical_sound",
+    "quiet_start",
+    "quiet_end",
+}
+ALERT_DETAIL_SELECT = """
+    ae.id, ae.transcript_id, ae.rule_id, ar.name AS rule_name,
+    ae.severity, ae.matched_text, ae.explanation, ae.status,
+    ae.assigned_to, ae.acknowledged_by, ae.acknowledged_at,
+    ae.resolved_by, ae.resolved_at, ae.resolution_note, ae.version,
+    ae.created_at, ae.updated_at, t.channel, t.recorded_at,
+    t.transcript_text, ar.requires_ack, ar.escalation_seconds
+"""
 
 
 def secure_headers(response):
@@ -401,7 +499,8 @@ def build_stats():
     )
     return {
         "status": "degraded" if degraded else "online",
-        "active_clients": len(manager.active_connections),
+        "active_clients": manager.active_user_count,
+        "active_connections": len(manager.active_connections),
         "model": RADIO_MODEL_SIZE,
         "retry_model": "large-v3",
         "transcription_enabled": transcription_enabled,
@@ -839,6 +938,9 @@ def get_current_profile(request: Request):
             "profiles": role_allows(session, "admin"),
             "suspect": role_allows(session, "supervisor"),
             "console": role_allows(session, "admin"),
+            "alerts": role_allows(session, "viewer"),
+            "acknowledge_alerts": role_allows(session, "operator"),
+            "manage_alert_rules": role_allows(session, "supervisor"),
         },
     }
 
@@ -901,6 +1003,9 @@ def get_history(
         high_watermark = connection.execute(
             "SELECT coalesce(max(id), 0) FROM transcripts"
         ).fetchone()[0]
+        event_high_watermark = connection.execute(
+            "SELECT coalesce(max(id), 0) FROM events"
+        ).fetchone()[0]
     rows = query_transcripts(
         query=q.strip(),
         after_id=after_id,
@@ -914,7 +1019,10 @@ def get_history(
     )
     return JSONResponse(
         rows,
-        headers={"X-Radio-High-Watermark": str(high_watermark)},
+        headers={
+            "X-Radio-High-Watermark": str(high_watermark),
+            "X-Radio-Event-Watermark": str(event_high_watermark),
+        },
     )
 
 
@@ -1174,12 +1282,17 @@ def get_transcript_detail(transcript_id: int, request: Request):
 
 
 @app.patch("/api/transcripts/{transcript_id}")
-def update_transcript(
+async def update_transcript(
     transcript_id: int,
     payload: TranscriptUpdatePayload,
     request: Request,
 ):
     session = require_role(request, "operator")
+    if payload.version is None:
+        raise HTTPException(
+            status_code=428,
+            detail="Transcript version is required for collaborative updates",
+        )
     updates = []
     parameters = []
     action_details = {}
@@ -1301,8 +1414,21 @@ def update_transcript(
                 json.dumps(after_payload, separators=(",", ":"), sort_keys=True),
             ),
         )
+        event, _ = record_event(
+            connection,
+            "transcript.updated",
+            resource_type="transcript",
+            resource_id=transcript_id,
+            actor=session["u"],
+            payload={
+                "transcript": after_payload,
+                "change_type": change_type,
+                "previous_version": before_row["version"],
+            },
+        )
         connection.commit()
     audit(session["u"], "update_transcript", transcript_id, action_details)
+    await manager.broadcast(event)
     return transcript_row_to_dict(row)
 
 
@@ -1555,6 +1681,618 @@ def delete_saved_search(search_id: int, request: Request):
     return {"ok": True}
 
 
+def validate_alert_rule_payload(payload):
+    name = payload.name.strip()
+    if not 1 <= len(name) <= 80:
+        raise HTTPException(status_code=400, detail="Rule name must be 1–80 characters")
+    if payload.severity not in ALERT_SEVERITIES:
+        raise HTTPException(status_code=400, detail="Invalid alert severity")
+    if payload.match_mode not in ALERT_MATCH_MODES:
+        raise HTTPException(status_code=400, detail="Invalid alert match mode")
+
+    def normalized_values(values, label, maximum=32):
+        result = []
+        for value in values:
+            cleaned = str(value).strip().lower()
+            if not cleaned:
+                continue
+            if len(cleaned) > 80:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{label} entries must be 80 characters or fewer",
+                )
+            if cleaned not in result:
+                result.append(cleaned)
+        if len(result) > maximum:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{label} supports at most {maximum} entries",
+            )
+        return result
+
+    terms = normalized_values(payload.terms, "Terms")
+    if not terms:
+        raise HTTPException(status_code=400, detail="At least one alert term is required")
+    exclusions = normalized_values(payload.exclusions, "Exclusions")
+    channels = [str(value).strip()[:160] for value in payload.channels if str(value).strip()]
+    channels = list(dict.fromkeys(channels))
+    if len(channels) > 32:
+        raise HTTPException(status_code=400, detail="Channel scope supports at most 32 entries")
+    for value, label in (
+        (payload.start_time, "start time"),
+        (payload.end_time, "end time"),
+    ):
+        if value and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+            raise HTTPException(status_code=400, detail=f"Invalid {label}")
+    if not 0 <= payload.minimum_quality <= 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Minimum quality must be between 0 and 1",
+        )
+    if not 0 <= payload.cooldown_seconds <= 86_400:
+        raise HTTPException(
+            status_code=400,
+            detail="Cooldown must be between 0 and 86400 seconds",
+        )
+    if not 0 <= payload.escalation_seconds <= 86_400:
+        raise HTTPException(
+            status_code=400,
+            detail="Escalation must be between 0 and 86400 seconds",
+        )
+    return {
+        "name": name,
+        "description": payload.description.strip()[:1000],
+        "severity": payload.severity,
+        "match_mode": payload.match_mode,
+        "terms_json": json.dumps(terms, separators=(",", ":")),
+        "exclusions_json": json.dumps(exclusions, separators=(",", ":")),
+        "channel_scope_json": json.dumps(channels, separators=(",", ":")),
+        "start_time": payload.start_time or None,
+        "end_time": payload.end_time or None,
+        "minimum_quality": payload.minimum_quality,
+        "cooldown_seconds": payload.cooldown_seconds,
+        "sound": payload.sound.strip()[:80],
+        "requires_ack": int(payload.requires_ack),
+        "escalation_seconds": payload.escalation_seconds,
+        "active": int(payload.active),
+    }
+
+
+@app.get("/api/events")
+def get_events(
+    request: Request,
+    after_id: int = 0,
+    limit: int = 500,
+):
+    require_role(request, "viewer")
+    if after_id < 0:
+        raise HTTPException(status_code=400, detail="Invalid event cursor")
+    with connect(read_only=True) as connection:
+        events = replay_events(connection, after_id=after_id, limit=limit)
+        high_watermark = connection.execute(
+            "SELECT coalesce(max(id), 0) FROM events"
+        ).fetchone()[0]
+    return {"items": events, "high_watermark": high_watermark}
+
+
+@app.get("/api/presence")
+def get_presence(request: Request):
+    session = require_role(request, "viewer")
+    result = manager.presence_payload()["payload"]
+    if role_allows(session, "supervisor"):
+        users = {}
+        for details in manager.connections.values():
+            users[details["username"]] = {
+                "username": details["username"],
+                "display_name": details["display_name"],
+                "role": details["role"],
+                "connected_at": details["connected_at"],
+                "last_seen": details["last_seen"],
+            }
+        result = {**result, "users": sorted(users.values(), key=lambda user: user["display_name"])}
+    return result
+
+
+@app.get("/api/alert-assignees")
+def get_alert_assignees(request: Request):
+    require_role(request, "viewer")
+    return [
+        user
+        for user in list_users()
+        if user["active"] and user["role"] in {"operator", "supervisor", "admin"}
+    ]
+
+
+@app.get("/api/alert-rules")
+def get_alert_rules(request: Request):
+    session = require_role(request, "viewer")
+    with connect(read_only=True) as connection:
+        if role_allows(session, "supervisor"):
+            rows = connection.execute(
+                "SELECT * FROM alert_rules ORDER BY active DESC, severity, lower(name)"
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM alert_rules
+                WHERE active = 1
+                ORDER BY severity, lower(name)
+                """
+            ).fetchall()
+    return [rule_row_to_dict(row) for row in rows]
+
+
+@app.post("/api/alert-rules")
+async def create_alert_rule(payload: AlertRulePayload, request: Request):
+    session = require_role(request, "supervisor")
+    values = validate_alert_rule_payload(payload)
+    now = datetime.now().isoformat()
+    with connect() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO alert_rules(
+                slug, name, description, severity, match_mode,
+                terms_json, exclusions_json, channel_scope_json,
+                start_time, end_time, minimum_quality, cooldown_seconds,
+                sound, requires_ack, escalation_seconds, active, is_default,
+                version, created_by, updated_by, created_at, updated_at
+            ) VALUES (
+                NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+                1, ?, ?, ?, ?
+            )
+            """,
+            (
+                values["name"],
+                values["description"],
+                values["severity"],
+                values["match_mode"],
+                values["terms_json"],
+                values["exclusions_json"],
+                values["channel_scope_json"],
+                values["start_time"],
+                values["end_time"],
+                values["minimum_quality"],
+                values["cooldown_seconds"],
+                values["sound"],
+                values["requires_ack"],
+                values["escalation_seconds"],
+                values["active"],
+                session["u"],
+                session["u"],
+                now,
+                now,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM alert_rules WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        rule = rule_row_to_dict(row)
+        event, _ = record_event(
+            connection,
+            "alert_rule.created",
+            resource_type="alert_rule",
+            resource_id=rule["id"],
+            actor=session["u"],
+            payload={"rule": rule},
+        )
+        connection.commit()
+    audit(session["u"], "create_alert_rule", details={"rule_id": rule["id"]})
+    await manager.broadcast(event)
+    return rule
+
+
+@app.put("/api/alert-rules/{rule_id}")
+async def update_alert_rule(
+    rule_id: int,
+    payload: AlertRulePayload,
+    request: Request,
+):
+    session = require_role(request, "supervisor")
+    if payload.version is None:
+        raise HTTPException(status_code=400, detail="Rule version is required")
+    values = validate_alert_rule_payload(payload)
+    now = datetime.now().isoformat()
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        current = connection.execute(
+            "SELECT * FROM alert_rules WHERE id = ?",
+            (rule_id,),
+        ).fetchone()
+        if current is None:
+            raise HTTPException(status_code=404, detail="Alert rule not found")
+        if current["version"] != payload.version:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "This alert rule changed in another session",
+                    "current": rule_row_to_dict(current),
+                },
+            )
+        connection.execute(
+            """
+            UPDATE alert_rules
+            SET name = ?, description = ?, severity = ?, match_mode = ?,
+                terms_json = ?, exclusions_json = ?, channel_scope_json = ?,
+                start_time = ?, end_time = ?, minimum_quality = ?,
+                cooldown_seconds = ?, sound = ?, requires_ack = ?,
+                escalation_seconds = ?, active = ?, updated_by = ?,
+                updated_at = ?, version = version + 1
+            WHERE id = ?
+            """,
+            (
+                values["name"],
+                values["description"],
+                values["severity"],
+                values["match_mode"],
+                values["terms_json"],
+                values["exclusions_json"],
+                values["channel_scope_json"],
+                values["start_time"],
+                values["end_time"],
+                values["minimum_quality"],
+                values["cooldown_seconds"],
+                values["sound"],
+                values["requires_ack"],
+                values["escalation_seconds"],
+                values["active"],
+                session["u"],
+                now,
+                rule_id,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM alert_rules WHERE id = ?",
+            (rule_id,),
+        ).fetchone()
+        rule = rule_row_to_dict(row)
+        event, _ = record_event(
+            connection,
+            "alert_rule.updated",
+            resource_type="alert_rule",
+            resource_id=rule_id,
+            actor=session["u"],
+            payload={"rule": rule, "previous_version": current["version"]},
+        )
+        connection.commit()
+    audit(session["u"], "update_alert_rule", details={"rule_id": rule_id})
+    await manager.broadcast(event)
+    return rule
+
+
+@app.post("/api/alert-rules/{rule_id}/test")
+def test_alert_rule(
+    rule_id: int,
+    payload: AlertTestPayload,
+    request: Request,
+):
+    require_role(request, "supervisor")
+    with connect(read_only=True) as connection:
+        row = connection.execute(
+            "SELECT * FROM alert_rules WHERE id = ?",
+            (rule_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+    rule = rule_row_to_dict(row)
+    matches = rule_matches(
+        rule,
+        {
+            "transcript_text": payload.transcript_text,
+            "channel": payload.channel,
+            "quality_score": payload.quality_score,
+            "recorded_at": payload.recorded_at or datetime.now().isoformat(),
+        },
+    )
+    return {
+        "matched": bool(matches),
+        "matches": matches,
+        "explanation": (
+            f"{rule['severity'].title()} because rule {rule['name']} matched "
+            f"“{matches[0]}”."
+            if matches
+            else "This sample does not match the rule."
+        ),
+    }
+
+
+def alert_filters(status, severity, assigned_to, include_suspect):
+    clauses = ["1 = 1"]
+    parameters = []
+    if status == "active":
+        clauses.append("ae.status IN ('open', 'acknowledged')")
+    elif status and status != "all":
+        if status not in ALERT_STATUSES:
+            raise HTTPException(status_code=400, detail="Invalid alert status")
+        clauses.append("ae.status = ?")
+        parameters.append(status)
+    if severity:
+        if severity not in ALERT_SEVERITIES:
+            raise HTTPException(status_code=400, detail="Invalid alert severity")
+        clauses.append("ae.severity = ?")
+        parameters.append(severity)
+    if assigned_to:
+        clauses.append("ae.assigned_to = ?")
+        parameters.append(assigned_to[:80])
+    if not include_suspect:
+        clauses.append("t.status = 'ready'")
+    else:
+        clauses.append("t.status != 'blank'")
+    return clauses, parameters
+
+
+@app.get("/api/alerts")
+def get_alerts(
+    request: Request,
+    status: str = "active",
+    severity: str = "",
+    assigned_to: str = Query("", max_length=80),
+    before_id: Optional[int] = None,
+    limit: int = 100,
+):
+    session = require_role(request, "viewer")
+    clauses, parameters = alert_filters(
+        status,
+        severity,
+        assigned_to.strip(),
+        role_allows(session, "supervisor"),
+    )
+    if before_id is not None:
+        clauses.append("ae.id < ?")
+        parameters.append(before_id)
+    where_clause = " AND ".join(clauses)
+    result_limit = max(1, min(int(limit), 200))
+    with connect(read_only=True) as connection:
+        count = connection.execute(
+            f"""
+            SELECT count(*)
+            FROM alert_events ae
+            JOIN alert_rules ar ON ar.id = ae.rule_id
+            JOIN transcripts t ON t.id = ae.transcript_id
+            WHERE {where_clause}
+            """,
+            parameters,
+        ).fetchone()[0]
+        rows = connection.execute(
+            f"""
+            SELECT {ALERT_DETAIL_SELECT}
+            FROM alert_events ae
+            JOIN alert_rules ar ON ar.id = ae.rule_id
+            JOIN transcripts t ON t.id = ae.transcript_id
+            WHERE {where_clause}
+            ORDER BY
+                CASE ae.severity
+                    WHEN 'critical' THEN 4
+                    WHEN 'urgent' THEN 3
+                    WHEN 'caution' THEN 2
+                    ELSE 1
+                END DESC,
+                ae.id DESC
+            LIMIT ?
+            """,
+            [*parameters, result_limit],
+        ).fetchall()
+        active_status_clause = (
+            "t.status != 'blank'"
+            if role_allows(session, "supervisor")
+            else "t.status = 'ready'"
+        )
+        active_count = connection.execute(
+            f"""
+            SELECT count(*)
+            FROM alert_events ae
+            JOIN transcripts t ON t.id = ae.transcript_id
+            WHERE ae.status IN ('open', 'acknowledged')
+              AND {active_status_clause}
+            """
+        ).fetchone()[0]
+    return {
+        "items": [alert_row_to_dict(row) for row in rows],
+        "count": count,
+        "active_count": active_count,
+        "next_before_id": rows[-1]["id"] if len(rows) == result_limit else None,
+    }
+
+
+@app.get("/api/alerts/summary")
+def get_alert_summary(request: Request):
+    session = require_role(request, "viewer")
+    status_clause = "t.status != 'blank'" if role_allows(session, "supervisor") else "t.status = 'ready'"
+    with connect(read_only=True) as connection:
+        rows = connection.execute(
+            f"""
+            SELECT ae.status, ae.severity, count(*) AS count
+            FROM alert_events ae
+            JOIN transcripts t ON t.id = ae.transcript_id
+            WHERE {status_clause}
+            GROUP BY ae.status, ae.severity
+            """
+        ).fetchall()
+    counts = {
+        status_name: {severity_name: 0 for severity_name in ALERT_SEVERITIES}
+        for status_name in ALERT_STATUSES
+    }
+    for row in rows:
+        counts[row["status"]][row["severity"]] = row["count"]
+    active_count = sum(counts[name][severity] for name in ("open", "acknowledged") for severity in ALERT_SEVERITIES)
+    return {"counts": counts, "active_count": active_count}
+
+
+@app.patch("/api/alerts/{alert_id}")
+async def update_alert(
+    alert_id: int,
+    payload: AlertUpdatePayload,
+    request: Request,
+):
+    session = require_role(request, "operator")
+    if payload.status is not None and payload.status not in ALERT_STATUSES:
+        raise HTTPException(status_code=400, detail="Invalid alert status")
+    if payload.status == "false_positive" and not role_allows(session, "supervisor"):
+        raise HTTPException(
+            status_code=403,
+            detail="Supervisor clearance is required to classify a false positive",
+        )
+    if payload.assigned_to is not None:
+        assigned_to = payload.assigned_to.strip()
+        valid_users = {user["username"] for user in list_users() if user["active"]}
+        if assigned_to and assigned_to not in valid_users:
+            raise HTTPException(status_code=400, detail="Unknown alert assignee")
+    else:
+        assigned_to = None
+    if payload.status is None and payload.assigned_to is None and payload.resolution_note is None:
+        raise HTTPException(status_code=400, detail="No alert changes supplied")
+    now = datetime.now().isoformat()
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        current = connection.execute(
+            f"""
+            SELECT {ALERT_DETAIL_SELECT}
+            FROM alert_events ae
+            JOIN alert_rules ar ON ar.id = ae.rule_id
+            JOIN transcripts t ON t.id = ae.transcript_id
+            WHERE ae.id = ?
+            """,
+            (alert_id,),
+        ).fetchone()
+        if current is None:
+            raise HTTPException(status_code=404, detail="Alert not found")
+        if current["version"] != payload.version:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "This alert changed in another session",
+                    "current": alert_row_to_dict(current),
+                },
+            )
+        updates = ["updated_at = ?", "version = version + 1"]
+        parameters = [now]
+        if payload.status is not None:
+            updates.append("status = ?")
+            parameters.append(payload.status)
+            if payload.status == "acknowledged":
+                updates.extend(["acknowledged_by = ?", "acknowledged_at = ?"])
+                parameters.extend([session["u"], now])
+            elif payload.status in {"resolved", "false_positive"}:
+                updates.extend(["resolved_by = ?", "resolved_at = ?"])
+                parameters.extend([session["u"], now])
+            elif payload.status == "open":
+                updates.extend(
+                    [
+                        "acknowledged_by = NULL",
+                        "acknowledged_at = NULL",
+                        "resolved_by = NULL",
+                        "resolved_at = NULL",
+                    ]
+                )
+        if payload.assigned_to is not None:
+            updates.append("assigned_to = ?")
+            parameters.append(assigned_to or None)
+        if payload.resolution_note is not None:
+            updates.append("resolution_note = ?")
+            parameters.append(payload.resolution_note.strip()[:1000])
+        parameters.append(alert_id)
+        connection.execute(
+            f"UPDATE alert_events SET {', '.join(updates)} WHERE id = ?",
+            parameters,
+        )
+        row = connection.execute(
+            f"""
+            SELECT {ALERT_DETAIL_SELECT}
+            FROM alert_events ae
+            JOIN alert_rules ar ON ar.id = ae.rule_id
+            JOIN transcripts t ON t.id = ae.transcript_id
+            WHERE ae.id = ?
+            """,
+            (alert_id,),
+        ).fetchone()
+        alert = alert_row_to_dict(row)
+        action = payload.status or ("assigned" if payload.assigned_to is not None else "annotated")
+        connection.execute(
+            """
+            INSERT INTO alert_acknowledgements(
+                alert_id, action, actor_username, note, alert_version, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                alert_id,
+                action,
+                session["u"],
+                payload.resolution_note.strip()[:1000]
+                if payload.resolution_note
+                else "",
+                alert["version"],
+                now,
+            ),
+        )
+        event, _ = record_event(
+            connection,
+            "alert.updated",
+            resource_type="alert",
+            resource_id=alert_id,
+            actor=session["u"],
+            payload={
+                "alert": alert,
+                "previous_version": current["version"],
+                "action": action,
+            },
+        )
+        connection.commit()
+    audit(session["u"], "update_alert", alert["transcript_id"], {"alert_id": alert_id, "action": action})
+    await manager.broadcast(event)
+    return alert
+
+
+@app.get("/api/notification-preferences")
+def get_notification_preferences(request: Request):
+    session = require_role(request, "viewer")
+    with connect(read_only=True) as connection:
+        row = connection.execute(
+            """
+            SELECT configuration, updated_at
+            FROM user_notification_preferences
+            WHERE username = ?
+            """,
+            (session["u"],),
+        ).fetchone()
+    return {
+        "configuration": json.loads(row["configuration"]) if row else {},
+        "updated_at": row["updated_at"] if row else None,
+    }
+
+
+@app.put("/api/notification-preferences")
+def save_notification_preferences(
+    payload: NotificationPreferencesPayload,
+    request: Request,
+):
+    session = require_role(request, "viewer")
+    unknown = set(payload.configuration) - NOTIFICATION_PREFERENCE_ALLOWED_KEYS
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported notification settings: {', '.join(sorted(unknown))}",
+        )
+    encoded = json.dumps(payload.configuration, separators=(",", ":"), sort_keys=True)
+    if len(encoded.encode("utf-8")) > 10_000:
+        raise HTTPException(status_code=400, detail="Notification preferences are too large")
+    now = datetime.now().isoformat()
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO user_notification_preferences(
+                username, configuration, updated_at
+            ) VALUES (?, ?, ?)
+            ON CONFLICT(username) DO UPDATE SET
+                configuration = excluded.configuration,
+                updated_at = excluded.updated_at
+            """,
+            (session["u"], encoded, now),
+        )
+        connection.commit()
+    return {"configuration": payload.configuration, "updated_at": now}
+
+
 @app.get("/api/users")
 def get_users(request: Request):
     require_role(request, "admin")
@@ -1562,7 +2300,7 @@ def get_users(request: Request):
 
 
 @app.post("/api/users")
-def save_user(payload: UserPayload, request: Request):
+async def save_user(payload: UserPayload, request: Request):
     session = require_role(request, "admin")
     try:
         user = upsert_user(
@@ -1574,7 +2312,17 @@ def save_user(payload: UserPayload, request: Request):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    with connect() as connection:
+        event, _ = record_event(
+            connection,
+            "profile.updated",
+            resource_type="profile",
+            actor=session["u"],
+            payload={"username": user["username"]},
+        )
+        connection.commit()
     audit(session["u"], "save_profile", details={"username": payload.username, "role": payload.role})
+    await manager.broadcast(event)
     return user
 
 
@@ -1582,9 +2330,48 @@ def save_user(payload: UserPayload, request: Request):
 async def new_transcript(payload: TranscriptPayload):
     if not has_meaningful_transcript(payload.transcript_text) or payload.status != "ready":
         return {"status": "ignored", "reason": payload.status}
-    data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
-    await manager.broadcast(data)
-    return {"status": "success"}
+    with connect() as connection:
+        if payload.id is not None:
+            row = connection.execute(
+                f"SELECT {TRANSCRIPT_DETAIL_COLUMNS} FROM transcripts WHERE id = ?",
+                (payload.id,),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                f"SELECT {TRANSCRIPT_DETAIL_COLUMNS} FROM transcripts WHERE filename = ?",
+                (payload.filename,),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Transcript delivery arrived before its database record",
+            )
+        transcript = transcript_row_to_dict(row)
+        event, created = record_event(
+            connection,
+            "transcript.created",
+            resource_type="transcript",
+            resource_id=transcript["id"],
+            actor="worker",
+            payload={"transcript": transcript},
+            dedupe_key=f"transcript.created:{transcript['id']}",
+        )
+        alerts, alert_events = evaluate_transcript_alerts(
+            connection,
+            transcript,
+            actor="worker",
+        )
+        connection.commit()
+    if created:
+        await manager.broadcast(event)
+    for alert_event in alert_events:
+        await manager.broadcast(alert_event)
+    return {
+        "status": "success",
+        "event_id": event["event_id"],
+        "alerts_created": len(alerts),
+        "duplicate": not created,
+    }
 
 
 @app.post("/api/internal/heartbeat")
@@ -1601,15 +2388,59 @@ async def websocket_endpoint(websocket: WebSocket):
         if parsed_origin.scheme != "https" or parsed_origin.netloc != request_host:
             await websocket.close(code=4403)
             return
-    if validate_session_token(websocket.cookies.get(SESSION_COOKIE)) is None:
+    session = validate_session_token(websocket.cookies.get(SESSION_COOKIE))
+    if session is None:
         await websocket.close(code=4401)
         return
-    await manager.connect(websocket)
     try:
+        after_event_id = int(websocket.query_params.get("after_event_id", "0"))
+        if after_event_id < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        await websocket.close(code=4400)
+        return
+    await manager.connect(websocket, session)
+    try:
+        with connect(read_only=True) as connection:
+            replay_high_watermark = connection.execute(
+                "SELECT coalesce(max(id), 0) FROM events"
+            ).fetchone()[0]
+            replay_cursor = after_event_id
+            while replay_cursor < replay_high_watermark:
+                missed_events = replay_events(
+                    connection,
+                    after_id=replay_cursor,
+                    limit=500,
+                )
+                if not missed_events:
+                    break
+                for event in missed_events:
+                    await websocket.send_text(
+                        json.dumps({**event, "replayed": True})
+                    )
+                replay_cursor = missed_events[-1]["event_id"]
+        await manager.broadcast_presence()
         while True:
-            await websocket.receive_text()
+            message = await websocket.receive_text()
+            manager.touch(websocket)
+            if message == "ping":
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "event_id": None,
+                            "type": "connection.pong",
+                            "resource_type": "connection",
+                            "resource_id": None,
+                            "actor": None,
+                            "payload": {},
+                            "created_at": datetime.now().isoformat(),
+                        }
+                    )
+                )
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+        await manager.broadcast_presence()
     except Exception as exc:
         logger.warning("WebSocket exception: %s", exc)
         manager.disconnect(websocket)
+        await manager.broadcast_presence()

@@ -95,6 +95,7 @@ def create_fixture(root, transcript_count=176):
     for name in ("source", "audio", "data", "security", "runtime", "logs", "models"):
         (root / name).mkdir(parents=True, exist_ok=True)
 
+    from backend.alerts import evaluate_transcript_alerts
     from backend.database import connect
     from backend.security import hash_password, save_security_config
 
@@ -210,6 +211,23 @@ def create_fixture(root, transcript_count=176):
             """,
             rows,
         )
+        alert_source_rows = connection.execute(
+            """
+            SELECT id, timestamp, recorded_at, channel, transcript_text,
+                   quality_score
+            FROM transcripts
+            WHERE status = 'ready'
+            ORDER BY id
+            """
+        ).fetchall()
+        alert_count = 0
+        for alert_source in alert_source_rows:
+            alerts, _ = evaluate_transcript_alerts(
+                connection,
+                dict(alert_source),
+                actor="fixture",
+            )
+            alert_count += len(alerts)
         heartbeat_time = now.isoformat()
         connection.executemany(
             """
@@ -266,6 +284,7 @@ def create_fixture(root, transcript_count=176):
         "password": TEST_PASSWORD,
         "transcripts": transcript_count,
         "channels": list(CHANNELS),
+        "alerts": alert_count,
     }
     (root / "fixture-summary.json").write_text(
         json.dumps(summary, indent=2),

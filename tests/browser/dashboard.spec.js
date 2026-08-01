@@ -158,6 +158,55 @@ test("indexed search spans years, filters facets, paginates, and saves views", a
   ]);
 });
 
+test("alert inbox acknowledges events, tests rules, and stays contained on mobile", async ({
+  page,
+}) => {
+  await signIn(page);
+
+  const alertsButton = page.getByRole("button", { name: "Alert inbox" });
+  await expect(page.locator("#alert-active-count")).toBeVisible();
+  await alertsButton.click();
+  const inbox = page.locator("#alert-inbox-view");
+  await expect(inbox).toBeVisible();
+  await expect(page.locator(".alert-item").first()).toBeVisible();
+  await expect(page.locator(".alert-explanation").first()).toContainText(
+    "because rule",
+  );
+  await expect(page.locator(".alert-severity").first()).toBeVisible();
+
+  const firstAlert = page.locator(".alert-item").first();
+  const acknowledge = firstAlert.getByRole("button", { name: "Acknowledge" });
+  await expect(acknowledge).toBeVisible();
+  await acknowledge.click();
+  await expect(firstAlert.locator(".alert-status")).toHaveText("acknowledged");
+
+  await page.getByRole("button", { name: "Manage rules" }).click();
+  const rulesDialog = page.locator("#alert-rule-dialog");
+  await expect(rulesDialog).toBeVisible();
+  await expect(page.locator(".alert-rule-row")).toHaveCount(5);
+  await page.getByRole("button", { name: "Edit Missing person" }).click();
+  await page
+    .getByPlaceholder("Example radio transmission")
+    .fill("Missing child reported at the east entrance");
+  await page.getByRole("button", { name: "Test rule" }).click();
+  await expect(page.locator("#alert-rule-test-result")).toContainText(
+    "Missing person",
+  );
+  await page.getByRole("button", { name: "Close alert rules" }).click();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(inbox).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() => ({
+        viewport: window.innerWidth,
+        document: document.documentElement.scrollWidth,
+      })),
+    )
+    .toEqual({ viewport: 390, document: 390 });
+  await expect(page.locator(".alert-item").first()).toBeVisible();
+});
+
 test("feed geometry is collision-free at every supported breakpoint", async ({
   page,
 }) => {

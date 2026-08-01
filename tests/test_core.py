@@ -22,6 +22,7 @@ os.environ["RADIO_AUDIO_DIR"] = AUDIO_DIR
 os.environ["RADIO_DB_PATH"] = os.path.join(DATA_DIR, "test.db")
 os.environ["RADIO_RECORDING_YEAR"] = "2026"
 
+from backend.alerts import rule_matches
 from backend.database import connect, initialize_database
 from backend.transcript_quality import (
     assess_transcript,
@@ -129,7 +130,117 @@ class DatabaseMigrationTests(unittest.TestCase):
                 WHERE type = 'table' AND name = 'transcripts_fts'
                 """
             ).fetchone()
+            phase_four_tables = {
+                row["name"]
+                for row in connection.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                      AND name IN (
+                          'events', 'alert_rules', 'alert_events',
+                          'alert_acknowledgements', 'alert_deliveries',
+                          'user_notification_preferences'
+                      )
+                    """
+                )
+            }
+            default_rules = connection.execute(
+                "SELECT count(*) FROM alert_rules WHERE is_default = 1"
+            ).fetchone()[0]
         self.assertIsNotNone(fts_table)
+        self.assertEqual(len(phase_four_tables), 6)
+        self.assertGreaterEqual(default_rules, 5)
+
+
+class AlertRuleMatchingTests(unittest.TestCase):
+    def rule(self, **overrides):
+        base = {
+            "minimum_quality": 0.5,
+            "channels": ["Medical"],
+            "start_time": "",
+            "end_time": "",
+            "match_mode": "whole_word",
+            "terms": ["medical", "not breathing"],
+            "exclusions": ["training exercise"],
+        }
+        return {**base, **overrides}
+
+    def transcript(self, text, **overrides):
+        base = {
+            "transcript_text": text,
+            "channel": "Medical",
+            "quality_score": 0.9,
+            "recorded_at": "2026-07-30T13:30:00",
+        }
+        return {**base, **overrides}
+
+    def test_whole_word_phrase_channel_quality_and_exclusion_filters(self):
+        self.assertEqual(
+            rule_matches(
+                self.rule(),
+                self.transcript("Medical requested, guest is not breathing."),
+            ),
+            ["Medical", "not breathing"],
+        )
+        self.assertEqual(
+            rule_matches(
+                self.rule(),
+                self.transcript("Biomedical equipment check"),
+            ),
+            [],
+        )
+        self.assertEqual(
+            rule_matches(
+                self.rule(),
+                self.transcript("Medical training exercise only"),
+            ),
+            [],
+        )
+        self.assertEqual(
+            rule_matches(
+                self.rule(),
+                self.transcript("Medical requested", channel="Security"),
+            ),
+            [],
+        )
+        self.assertEqual(
+            rule_matches(
+                self.rule(),
+                self.transcript("Medical requested", quality_score=0.2),
+            ),
+            [],
+        )
+
+    def test_prefix_and_overnight_time_scope(self):
+        rule = self.rule(
+            channels=[],
+            match_mode="prefix",
+            terms=["medic"],
+            exclusions=[],
+            start_time="22:00",
+            end_time="06:00",
+        )
+        self.assertEqual(
+            rule_matches(
+                rule,
+                self.transcript(
+                    "Medical team requested",
+                    recorded_at="2026-07-30T23:15:00",
+                ),
+            ),
+            ["Medical"],
+        )
+        self.assertEqual(
+            rule_matches(
+                rule,
+                self.transcript(
+                    "Medical team requested",
+                    recorded_at="2026-07-30T12:15:00",
+                ),
+            ),
+            [],
+        )
 
 
 class MultiYearArchiveMigrationTests(unittest.TestCase):

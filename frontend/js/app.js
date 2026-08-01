@@ -259,6 +259,7 @@ const storedKeywordVersion = Number(
 let alertKeywords = Array.isArray(storedKeywords)
   ? storedKeywords
   : [...DEFAULT_ALERT_KEYWORDS];
+let serverManagedAlerts = false;
 
 if (storedKeywordVersion < KEYWORD_SET_VERSION) {
   alertKeywords = [...new Set([...alertKeywords, ...DEFAULT_ALERT_KEYWORDS])];
@@ -273,9 +274,11 @@ function renderKeywords() {
   alertKeywords.forEach((kw) => {
     const span = document.createElement("span");
     span.className = "keyword-chip";
-    span.title = "Click to remove";
-    span.innerText = `${kw} ✕`;
-    span.onclick = () => removeKeyword(kw);
+    span.title = serverManagedAlerts
+      ? "Managed by a server alert rule"
+      : "Click to remove";
+    span.innerText = serverManagedAlerts ? kw : `${kw} ✕`;
+    if (!serverManagedAlerts) span.onclick = () => removeKeyword(kw);
     container.appendChild(span);
   });
 
@@ -288,7 +291,9 @@ function renderKeywords() {
       ? new RegExp(`\\b((?:${safeKeywords.join("|")})\\w*)`, "gi")
       : null;
 
-  localStorage.setItem("radioKeywords", JSON.stringify(alertKeywords));
+  if (!serverManagedAlerts) {
+    localStorage.setItem("radioKeywords", JSON.stringify(alertKeywords));
+  }
   document.getElementById("keyword-count").innerText = alertKeywords.length;
 }
 
@@ -335,6 +340,11 @@ window.rehighlightAllMessages = function () {
 
 window.addKeyword = function (e) {
   if (e.key === "Enter" && e.target.value.trim() !== "") {
+    if (serverManagedAlerts && window.phaseFourOpenRuleDialog) {
+      window.phaseFourOpenRuleDialog(e.target.value.trim());
+      e.target.value = "";
+      return;
+    }
     const kw = e.target.value.trim().toLowerCase();
     if (!alertKeywords.includes(kw)) {
       alertKeywords.push(kw);
@@ -347,10 +357,23 @@ window.addKeyword = function (e) {
 };
 
 window.removeKeyword = function (kw) {
+  if (serverManagedAlerts) {
+    window.phaseFourOpenRuleDialog?.(kw);
+    return;
+  }
   alertKeywords = alertKeywords.filter((k) => k !== kw);
   renderKeywords();
   rehighlightAllMessages();
   showToast(`Keyword removed: ${kw}`);
+};
+
+window.setServerAlertKeywords = function (keywords) {
+  serverManagedAlerts = true;
+  alertKeywords = [
+    ...new Set((keywords || []).map((item) => String(item).toLowerCase())),
+  ];
+  renderKeywords();
+  rehighlightAllMessages();
 };
 
 renderKeywords();
@@ -1239,6 +1262,13 @@ async function loadArchive(options = {}) {
   if (Number.isFinite(highWatermark) && highWatermark > 0) {
     lastSeenTranscriptId = Math.max(lastSeenTranscriptId, highWatermark);
   }
+  const eventHighWatermark = Number(
+    response.headers.get("X-Radio-Event-Watermark") || 0,
+  );
+  if (Number.isFinite(eventHighWatermark) && eventHighWatermark > 0) {
+    lastSeenEventId = Math.max(lastSeenEventId, eventHighWatermark);
+    sessionStorage.setItem("radioLastEventId", String(lastSeenEventId));
+  }
   const receivedRows = await response.json();
   if (requestNumber !== archiveRequestNumber) return 0;
   const hasOlderPage =
@@ -1486,7 +1516,11 @@ function processIncomingData(data, options = {}) {
   }
   const insertedAtEnd = insertCardChronologically(container, card);
 
-  if (options.notify !== false && hasAlertKeyword(data.transcript_text)) {
+  if (
+    options.notify !== false &&
+    !window.phaseFourAlertsEnabled &&
+    hasAlertKeyword(data.transcript_text)
+  ) {
     triggerDesktopNotification(channelName, data.transcript_text);
     recordConsoleEvent(
       "info",
@@ -1963,6 +1997,7 @@ let ws;
 let reconnectTimer;
 let reconnectAttempt = 0;
 let currentConnectionState = "";
+let lastSeenEventId = Number(sessionStorage.getItem("radioLastEventId") || "0");
 
 function setConnectionState(state) {
   const label = document.getElementById("connection-label");
@@ -1992,11 +2027,37 @@ function connectWebSocket() {
   if (ws && [WebSocket.OPEN, WebSocket.CONNECTING].includes(ws.readyState)) return;
   setConnectionState("connecting");
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+  ws = new WebSocket(
+    `${protocol}//${window.location.host}/ws?after_event_id=${lastSeenEventId}`,
+  );
 
   ws.onmessage = (event) => {
     try {
-      processIncomingData(JSON.parse(event.data));
+      const payload = JSON.parse(event.data);
+      if (Number(payload.event_id) > lastSeenEventId) {
+        lastSeenEventId = Number(payload.event_id);
+        sessionStorage.setItem("radioLastEventId", String(lastSeenEventId));
+      }
+      if (payload.type === "transcript.created") {
+        processIncomingData(payload.payload?.transcript);
+      } else if (payload.type === "transcript.updated") {
+        window.phaseFourHandleTranscriptUpdate?.(payload.payload?.transcript);
+      } else if (payload.type === "presence.changed") {
+        const count = Number(payload.payload?.active_users || 0);
+        document.getElementById("active-operators").innerText =
+          `${count} operator${count === 1 ? "" : "s"}`;
+      } else if (
+        payload.type === "profile.updated" &&
+        payload.payload?.username === currentProfile?.username &&
+        !payload.replayed
+      ) {
+        showToast("Your access profile changed. Refreshing securely…");
+        window.setTimeout(() => window.location.reload(), 250);
+      } else if (payload.type?.startsWith("alert")) {
+        window.phaseFourHandleEvent?.(payload);
+      } else if (!payload.type && payload.transcript_text) {
+        processIncomingData(payload);
+      }
     } catch (error) {
       recordConsoleEvent("error", "Invalid live feed event", error.message);
     }

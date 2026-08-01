@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from glob import glob
 
+from backend.alerts import seed_default_alert_rules
 from backend.config import DB_NAME
 
 
@@ -370,6 +371,106 @@ def initialize_database():
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                resource_type TEXT NOT NULL DEFAULT '',
+                resource_id INTEGER,
+                actor_username TEXT,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                dedupe_key TEXT UNIQUE,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_events_created
+                ON events(id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_events_resource
+                ON events(resource_type, resource_id, id);
+
+            CREATE TABLE IF NOT EXISTS alert_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug TEXT UNIQUE,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                severity TEXT NOT NULL DEFAULT 'caution',
+                match_mode TEXT NOT NULL DEFAULT 'whole_word',
+                terms_json TEXT NOT NULL DEFAULT '[]',
+                exclusions_json TEXT NOT NULL DEFAULT '[]',
+                channel_scope_json TEXT NOT NULL DEFAULT '[]',
+                start_time TEXT,
+                end_time TEXT,
+                minimum_quality REAL NOT NULL DEFAULT 0.0,
+                cooldown_seconds INTEGER NOT NULL DEFAULT 60,
+                sound TEXT NOT NULL DEFAULT '',
+                requires_ack INTEGER NOT NULL DEFAULT 0,
+                escalation_seconds INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                version INTEGER NOT NULL DEFAULT 1,
+                created_by TEXT NOT NULL,
+                updated_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_alert_rules_active_severity
+                ON alert_rules(active, severity, id);
+
+            CREATE TABLE IF NOT EXISTS alert_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                transcript_id INTEGER NOT NULL,
+                rule_id INTEGER NOT NULL,
+                severity TEXT NOT NULL,
+                matched_text TEXT NOT NULL,
+                explanation TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                assigned_to TEXT,
+                acknowledged_by TEXT,
+                acknowledged_at TEXT,
+                resolved_by TEXT,
+                resolved_at TEXT,
+                resolution_note TEXT NOT NULL DEFAULT '',
+                version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(transcript_id, rule_id),
+                FOREIGN KEY(transcript_id) REFERENCES transcripts(id),
+                FOREIGN KEY(rule_id) REFERENCES alert_rules(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_alert_events_status_severity
+                ON alert_events(status, severity, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_alert_events_transcript
+                ON alert_events(transcript_id, id DESC);
+
+            CREATE TABLE IF NOT EXISTS alert_acknowledgements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                alert_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                actor_username TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                alert_version INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(alert_id) REFERENCES alert_events(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_alert_acknowledgements_alert
+                ON alert_acknowledgements(alert_id, id DESC);
+
+            CREATE TABLE IF NOT EXISTS alert_deliveries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                alert_id INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                delivery_method TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error TEXT NOT NULL DEFAULT '',
+                attempted_at TEXT NOT NULL,
+                UNIQUE(alert_id, username, delivery_method),
+                FOREIGN KEY(alert_id) REFERENCES alert_events(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS user_notification_preferences (
+                username TEXT PRIMARY KEY,
+                configuration TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL
+            );
+
             CREATE VIRTUAL TABLE IF NOT EXISTS transcripts_fts USING fts5(
                 transcript_text,
                 notes,
@@ -432,6 +533,7 @@ def initialize_database():
             WHERE raw_transcript_text IS NULL
             """
         )
+        seed_default_alert_rules(connection)
         backfill_archive_metadata(connection)
         imported_archives = import_annual_databases(connection)
         fts_version = connection.execute(

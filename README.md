@@ -15,6 +15,15 @@ them with Whisper, and presents a secure live operations dashboard.
   safe phrase/prefix syntax, highlighted context, facets, and relevance sorting.
 - Search preferences and named saved searches follow each signed-in operator
   because they are retained server-side rather than in one browser.
+- Server-owned alert rules support severity, term/phrase/prefix matching,
+  exclusions, channel and time scope, quality thresholds, cooldowns,
+  acknowledgement requirements, assignments, and test-before-save previews.
+- The alert inbox tracks open, acknowledged, resolved, and false-positive
+  events with response history and per-user notification preferences.
+- Transcript, alert, rule, and profile mutations use a durable replayable event
+  stream so every connected operator sees changes without refreshing.
+- Presence counts unique authenticated users rather than browser tabs, and
+  version preconditions prevent silent multi-user overwrites.
 - Repetitive or low-confidence transcripts are quarantined for supervisor review.
 - Operators use a five-state review workflow, bookmarks, notes, immutable
   change history, and an eight-second undo window.
@@ -62,9 +71,12 @@ the selected state persists across app restarts and updates.
 
 ## Clearance profiles
 
-- **Viewer:** transcripts, archive search, and bookmarks view; no source audio.
-- **Operator:** viewer access plus audio, review state, bookmarks, and notes.
-- **Supervisor:** operator access plus suspect transcripts, corrections, and exports.
+- **Viewer:** transcripts, archive search, bookmarks, and alert inbox view; no
+  source audio.
+- **Operator:** viewer access plus audio, review state, bookmarks, notes, alert
+  acknowledgement, assignment, and resolution.
+- **Supervisor:** operator access plus suspect transcripts, corrections,
+  exports, alert-rule management, and false-positive classification.
 - **Administrator:** supervisor access plus profile management, program console,
   and native transcription-service controls.
 
@@ -225,13 +237,15 @@ verified copies, garbage-transcript classification, access control, archive
 pagination, uncapped streaming export, versioned review history, workspace
 visibility, model management, and updater safety. The API suite verifies FTS5
 phrases, prefixes, snippets, facets, exact year counts, cursors, reindexing,
-preferences, and saved-search authorization. The Playwright suite starts an
-isolated HTTPS server, creates 176 disposable transmissions across eight
-realistic feeds and three years, and checks authentication, indexed archive
-search, filtering, pagination, saved views, overlay controls, the console,
-detail editing and undo, the global player, shortcuts, workspaces, full export,
-mobile feed navigation, and feed geometry from 320 through 1,920 pixels in the
-installed stable Google Chrome.
+preferences, saved-search authorization, alert matching/deduplication,
+acknowledgement conflicts, event replay, two-user WebSocket propagation, and
+unique-user presence. The Playwright suite starts an isolated HTTPS server,
+creates 176 disposable transmissions across eight realistic feeds and three
+years, and checks authentication, indexed archive search, filtering,
+pagination, saved views, the alert inbox, rule testing, acknowledgement,
+overlay controls, the console, detail editing and undo, the global player,
+shortcuts, workspaces, full export, mobile feed navigation, and feed geometry
+from 320 through 1,920 pixels in the installed stable Google Chrome.
 
 The same command runs a deterministic 100,000- and 500,000-row FTS5 benchmark.
 Its exact-count search must remain below a 200 ms p95 gate at both sizes.

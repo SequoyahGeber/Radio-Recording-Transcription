@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Radio Command Center | Live Ops</title>
 
-    <link rel="stylesheet" href="/static/css/style.css?v=20260730-8" />
+    <link rel="stylesheet" href="/static/css/style.css?v=20260730-9" />
   </head>
   <body>
     <header id="topbar">
@@ -66,6 +66,17 @@
         </div>
 
         <div class="topbar-actions">
+          <button
+            id="alerts-button"
+            class="topbar-control-btn"
+            type="button"
+            aria-label="Alert inbox"
+            aria-controls="alert-inbox-view"
+          >
+            <span class="button-icon" aria-hidden="true">!</span>
+            <span class="topbar-action-label">Alerts</span>
+            <span id="alert-active-count" class="alert-active-count" hidden>0</span>
+          </button>
           <button
             id="workspace-button"
             class="topbar-control-btn"
@@ -194,13 +205,13 @@
 
         <section class="control-card alerts-control-card">
           <div class="section-title section-title-row">
-            <span>Emergency Highlights</span>
+            <span>Server Alert Rules</span>
             <span id="keyword-count" class="section-count"></span>
           </div>
           <input
             type="text"
             id="new-keyword"
-            placeholder="Add keyword + Enter"
+            placeholder="Create rule from a term + Enter"
             class="search-input keyword-input"
           />
           <div id="keyword-list" class="keyword-list"></div>
@@ -367,6 +378,69 @@
       <div class="archive-search-pagination">
         <button id="archive-search-more" class="btn" type="button" hidden>
           Load more results
+        </button>
+      </div>
+    </section>
+
+    <section
+      id="alert-inbox-view"
+      class="alert-inbox-view"
+      aria-label="Alert inbox"
+      hidden
+    >
+      <div class="alert-inbox-header">
+        <div>
+          <span class="archive-search-eyebrow">Operational response</span>
+          <h2>Alert inbox</h2>
+          <div id="alert-inbox-summary" class="archive-search-summary">
+            Loading alert status…
+          </div>
+        </div>
+        <div class="alert-inbox-header-actions">
+          <button id="manage-alert-rules" class="btn" type="button" hidden>
+            Manage rules
+          </button>
+          <button id="refresh-alerts" class="btn btn-quiet" type="button">
+            Refresh
+          </button>
+          <button id="alerts-back-board" class="btn btn-quiet" type="button">
+            Back to live board
+          </button>
+        </div>
+      </div>
+      <div class="alert-inbox-filters" aria-label="Alert inbox filters">
+        <label>
+          <span>Status</span>
+          <select id="alert-filter-status">
+            <option value="active">Needs attention</option>
+            <option value="open">Open</option>
+            <option value="acknowledged">Acknowledged</option>
+            <option value="resolved">Resolved</option>
+            <option value="false_positive">False positive</option>
+            <option value="all">All alerts</option>
+          </select>
+        </label>
+        <label>
+          <span>Severity</span>
+          <select id="alert-filter-severity">
+            <option value="">All severities</option>
+            <option value="critical">Critical</option>
+            <option value="urgent">Urgent</option>
+            <option value="caution">Caution</option>
+            <option value="informational">Informational</option>
+          </select>
+        </label>
+        <label>
+          <span>Assignment</span>
+          <select id="alert-filter-assignee">
+            <option value="">Everyone</option>
+          </select>
+        </label>
+      </div>
+      <div id="alert-inbox-list" class="alert-inbox-list" aria-live="polite"></div>
+      <div class="archive-search-pagination">
+        <button id="alert-load-more" class="btn" type="button" hidden>
+          Load older alerts
         </button>
       </div>
     </section>
@@ -627,6 +701,126 @@
       </form>
     </dialog>
 
+    <dialog id="alert-rule-dialog" class="workspace-dialog alert-rule-dialog">
+      <form method="dialog" class="dialog-shell">
+        <div class="dialog-header">
+          <div>
+            <span class="drawer-eyebrow">Supervisor controls</span>
+            <h2>Alert rules</h2>
+          </div>
+          <button
+            class="drawer-icon-button"
+            value="cancel"
+            aria-label="Close alert rules"
+          >×</button>
+        </div>
+        <div class="alert-rule-layout">
+          <div>
+            <div class="drawer-section-heading">
+              <h3>Configured rules</h3>
+              <span id="alert-rule-count" class="section-count"></span>
+            </div>
+            <div id="alert-rule-list" class="workspace-list alert-rule-list"></div>
+          </div>
+          <div class="alert-rule-editor">
+            <input id="alert-rule-id" type="hidden" />
+            <input id="alert-rule-version" type="hidden" />
+            <label>
+              <span>Rule name</span>
+              <input id="alert-rule-name" maxlength="80" />
+            </label>
+            <label>
+              <span>Description</span>
+              <textarea id="alert-rule-description" rows="2"></textarea>
+            </label>
+            <div class="drawer-form-grid">
+              <label>
+                <span>Severity</span>
+                <select id="alert-rule-severity">
+                  <option value="critical">Critical</option>
+                  <option value="urgent">Urgent</option>
+                  <option value="caution" selected>Caution</option>
+                  <option value="informational">Informational</option>
+                </select>
+              </label>
+              <label>
+                <span>Match type</span>
+                <select id="alert-rule-match-mode">
+                  <option value="whole_word">Whole word / phrase</option>
+                  <option value="prefix">Word prefix</option>
+                  <option value="phrase">Exact phrase</option>
+                </select>
+              </label>
+            </div>
+            <label>
+              <span>Terms, separated by commas</span>
+              <textarea id="alert-rule-terms" rows="3"></textarea>
+            </label>
+            <label>
+              <span>Exclusions, separated by commas</span>
+              <input id="alert-rule-exclusions" />
+            </label>
+            <label>
+              <span>Channels, separated by commas (blank means all)</span>
+              <input id="alert-rule-channels" />
+            </label>
+            <div class="drawer-form-grid">
+              <label>
+                <span>Cooldown seconds</span>
+                <input id="alert-rule-cooldown" type="number" min="0" max="86400" value="60" />
+              </label>
+              <label>
+                <span>Minimum quality</span>
+                <input id="alert-rule-quality" type="number" min="0" max="1" step="0.05" value="0" />
+              </label>
+            </div>
+            <div class="drawer-form-grid">
+              <label>
+                <span>Active from</span>
+                <input id="alert-rule-start-time" type="time" />
+              </label>
+              <label>
+                <span>Active until</span>
+                <input id="alert-rule-end-time" type="time" />
+              </label>
+            </div>
+            <div class="drawer-form-grid">
+              <label>
+                <span>Escalate after seconds</span>
+                <input id="alert-rule-escalation" type="number" min="0" max="86400" value="0" />
+              </label>
+              <label>
+                <span>Notification sound</span>
+                <input id="alert-rule-sound" maxlength="80" placeholder="Optional sound name" />
+              </label>
+            </div>
+            <div class="alert-rule-checks">
+              <label><input id="alert-rule-requires-ack" type="checkbox" /> Requires acknowledgement</label>
+              <label><input id="alert-rule-active" type="checkbox" checked /> Active</label>
+            </div>
+            <div class="drawer-action-row">
+              <button id="save-alert-rule" class="btn btn-primary" type="button">
+                Save rule
+              </button>
+              <button id="new-alert-rule" class="btn btn-quiet" type="button">
+                New rule
+              </button>
+            </div>
+            <div class="alert-rule-test">
+              <label>
+                <span>Test sample without creating an alert</span>
+                <input id="alert-rule-test-text" placeholder="Example radio transmission" />
+              </label>
+              <button id="test-alert-rule" class="btn btn-quiet" type="button">
+                Test rule
+              </button>
+              <span id="alert-rule-test-result" aria-live="polite"></span>
+            </div>
+          </div>
+        </div>
+      </form>
+    </dialog>
+
     <section id="console-panel" class="console-panel" aria-label="Program console" hidden>
       <div class="console-header">
         <div>
@@ -668,8 +862,9 @@
     </div>
     <div id="toast-container"></div>
 
-    <script src="/static/js/app.js?v=20260730-5"></script>
+    <script src="/static/js/app.js?v=20260730-6"></script>
     <script src="/static/js/phase2.js?v=20260730-2"></script>
     <script src="/static/js/phase3.js?v=20260730-1"></script>
+    <script src="/static/js/phase4.js?v=20260730-1"></script>
   </body>
 </html>
