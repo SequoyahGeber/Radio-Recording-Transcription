@@ -4,9 +4,11 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import threading
 import time
+import zipfile
 import zlib
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
@@ -33,6 +35,14 @@ from backend.alerts import (
     rule_matches,
     rule_row_to_dict,
 )
+from backend.analytics import list_profiles, quality_analytics, save_profile
+from backend.backups import (
+    create_backup,
+    create_scheduled_backup_if_due,
+    list_backups,
+    restore_drill,
+    verify_backup,
+)
 from backend.config import (
     AUDIO_DIR,
     DB_NAME,
@@ -41,9 +51,21 @@ from backend.config import (
     RADIO_HOST,
     RECORDING_SOURCE_DIR,
     load_settings,
+    save_settings,
 )
 from backend.database import audit, connect, initialize_database
 from backend.events import record_event, replay_events
+from backend.glossaries import list_glossaries, save_glossary
+from backend.incidents import (
+    INCIDENT_SEVERITIES,
+    INCIDENT_STATUSES,
+    INCIDENT_TASK_STATUSES,
+    INCIDENT_SUMMARY_SELECT,
+    get_incident,
+    incident_detail,
+    incident_row_to_dict,
+    task_row_to_dict,
+)
 from backend.security import (
     SESSION_COOKIE,
     SESSION_SECONDS,
@@ -58,7 +80,14 @@ from backend.security import (
     verify_internal_token,
 )
 from backend.search import search_transcripts
-from backend.transcript_quality import has_meaningful_transcript
+from backend.readiness import readiness_status, validate_source
+from backend.jobs import queue_summary
+from backend.model_downloads import (
+    all_model_statuses,
+    control_download,
+    start_download,
+)
+from backend.transcript_quality import assess_transcript, has_meaningful_transcript
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -87,6 +116,20 @@ app = FastAPI(
     openapi_url=None,
 )
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
+
+
+@app.on_event("startup")
+def schedule_recovery_backup():
+    if setup_required() or os.environ.get("RADIO_DISABLE_AUTOMATIC_BACKUP") == "1":
+        return
+
+    def run_backup():
+        try:
+            create_scheduled_backup_if_due()
+        except Exception:
+            logger.exception("Automatic recovery backup failed")
+
+    threading.Thread(target=run_backup, daemon=True).start()
 
 
 class ConnectionManager:
@@ -154,8 +197,6 @@ login_failures = defaultdict(deque)
 login_lock = threading.Lock()
 stats_lock = threading.Lock()
 stats_cache = {"at": 0.0, "payload": None}
-audio_count_lock = threading.Lock()
-audio_count_cache = {"at": 0.0, "value": 0}
 LOG_FILE_NAMES = {
     "server": "server.log",
     "worker": "worker.log",
@@ -190,6 +231,13 @@ class SetupPayload(BaseModel):
     password: str
 
 
+class SetupConfigurationPayload(BaseModel):
+    source_dir: str
+    transcription_enabled: bool = True
+    minimum_free_gb: int = 10
+    setup_step: int = 2
+
+
 class TranscriptUpdatePayload(BaseModel):
     reviewed: Optional[bool] = None
     review_state: Optional[str] = None
@@ -198,6 +246,28 @@ class TranscriptUpdatePayload(BaseModel):
     bookmarked: Optional[bool] = None
     notes: Optional[str] = None
     transcript_text: Optional[str] = None
+
+
+class TranscriptSelectionPayload(BaseModel):
+    selection: str
+    version: int
+
+
+class GlossaryPayload(BaseModel):
+    terms: List[str] = Field(default_factory=list)
+    language: str = "en"
+    version: Optional[int] = None
+
+
+class ModelControlPayload(BaseModel):
+    action: str
+
+
+class TranscriptionProfilePayload(BaseModel):
+    normalize_audio: bool = False
+    denoise_audio: bool = False
+    language_mode: str = "explicit"
+    experimental_enabled: bool = False
 
 
 class WorkspacePayload(BaseModel):
@@ -252,6 +322,40 @@ class NotificationPreferencesPayload(BaseModel):
     configuration: dict
 
 
+class IncidentPayload(BaseModel):
+    title: str
+    severity: str = "informational"
+    status: str = "monitoring"
+    owner_username: Optional[str] = None
+    location: str = ""
+    summary: str = ""
+    tags: List[str] = Field(default_factory=list)
+    started_at: Optional[str] = None
+    version: Optional[int] = None
+
+
+class IncidentTranscriptPayload(BaseModel):
+    transcript_id: int
+
+
+class IncidentTaskPayload(BaseModel):
+    description: str
+    assigned_to: Optional[str] = None
+    due_at: Optional[str] = None
+
+
+class IncidentTaskUpdatePayload(BaseModel):
+    description: Optional[str] = None
+    status: Optional[str] = None
+    assigned_to: Optional[str] = None
+    due_at: Optional[str] = None
+    version: int
+
+
+class IncidentNotePayload(BaseModel):
+    note: str
+
+
 class UserPayload(BaseModel):
     username: str
     display_name: str = ""
@@ -275,7 +379,10 @@ TRANSCRIPT_DETAIL_COLUMNS = """
     review_resolution, version, bookmarked, notes, corrected_by,
     corrected_at, transcription_model, retry_transcript_text, retry_model,
     retry_quality_score, retry_quality_reason, retry_quality_metrics,
-    retry_status, retry_attempted_at
+    retry_status, retry_attempted_at, primary_quality_score,
+    primary_quality_reason, primary_quality_metrics, primary_status,
+    primary_model, retry_trigger_reason, selection_reason,
+    selected_transcript
 """
 WORKSPACE_ALLOWED_KEYS = {
     "visible_feeds",
@@ -346,7 +453,7 @@ def wants_html(request):
 async def authentication_and_headers(request: Request, call_next):
     path = request.url.path
     is_public = path == "/login" or path == "/api/login" or path.startswith("/static/")
-    is_setup_public = path == "/setup" or path == "/api/setup"
+    is_setup_public = path == "/setup" or path.startswith("/api/setup")
     is_internal = path in {"/api/new_transcript", "/api/internal/heartbeat"}
 
     if is_internal:
@@ -410,34 +517,6 @@ def read_html(filename):
         return HTMLResponse(handle.read())
 
 
-def count_audio_files():
-    with audio_count_lock:
-        if time.time() - audio_count_cache["at"] < 30:
-            return audio_count_cache["value"]
-
-        total = 0
-        pending_directories = [AUDIO_DIR]
-        while pending_directories:
-            directory = pending_directories.pop()
-            try:
-                with os.scandir(directory) as entries:
-                    for entry in entries:
-                        try:
-                            if entry.is_dir(follow_symlinks=False):
-                                pending_directories.append(entry.path)
-                            elif entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(
-                                (".mp3", ".wav", ".m4a")
-                            ):
-                                total += 1
-                        except OSError:
-                            continue
-            except OSError:
-                continue
-
-        audio_count_cache.update({"at": time.time(), "value": total})
-        return total
-
-
 def read_heartbeats():
     with connect(read_only=True) as connection:
         rows = connection.execute(
@@ -478,13 +557,18 @@ def build_stats():
             "SELECT count(*) FROM transcripts WHERE timestamp >= ?",
             (window_start.isoformat(),),
         ).fetchone()[0]
+        synced_count = connection.execute(
+            "SELECT count(*) FROM synced_files"
+        ).fetchone()[0]
 
-    total_audio = count_audio_files()
     processed = row["processed"] or 0
+    heartbeats = read_heartbeats()
+    sync_details = heartbeats.get("sync", {}).get("details", {})
+    source_count = int(sync_details.get("source_files") or 0)
+    total_audio = max(processed, synced_count, source_count)
     backlog = max(0, total_audio - processed)
     rate_per_minute = recent_count / 15
     eta_minutes = backlog / rate_per_minute if rate_per_minute > 0 else None
-    heartbeats = read_heartbeats()
     transcription_enabled = bool(
         load_settings().get("transcription_enabled", True)
     )
@@ -566,6 +650,14 @@ def transcript_row_to_dict(row):
         "retry_quality_reason",
         "retry_quality_metrics",
         "retry_attempted_at",
+        "primary_quality_score",
+        "primary_quality_reason",
+        "primary_quality_metrics",
+        "primary_status",
+        "primary_model",
+        "retry_trigger_reason",
+        "selection_reason",
+        "selected_transcript",
     ):
         if column in row_keys:
             payload[column] = row[column]
@@ -578,6 +670,7 @@ def transcript_row_to_dict(row):
 
 def transcript_filter(
     query="",
+    channel="",
     after_id=None,
     before_id=None,
     date_value="",
@@ -623,6 +716,9 @@ def transcript_filter(
             """
         )
         parameters.extend([like, like, like])
+    if channel:
+        clauses.append("channel = ?")
+        parameters.append(channel)
     effective_time = "coalesce(recorded_at, timestamp)"
     if date_value:
         clauses.append(f"substr({effective_time}, 1, 10) = ?")
@@ -650,6 +746,7 @@ def transcript_filter(
 
 def query_transcripts(
     query="",
+    channel="",
     after_id=None,
     before_id=None,
     limit=500,
@@ -662,6 +759,7 @@ def query_transcripts(
 ):
     where_clause, parameters = transcript_filter(
         query=query,
+        channel=channel,
         after_id=after_id,
         before_id=before_id,
         date_value=date_value,
@@ -841,6 +939,327 @@ def console_log_entries(service, line_limit):
     return entries[-line_limit:]
 
 
+def _heartbeat_problem(heartbeat):
+    if heartbeat is None:
+        return "No heartbeat has been recorded"
+    details = heartbeat.get("details") or {}
+    return str(details.get("error") or details.get("reason") or "")[:500]
+
+
+def build_health_center():
+    now = datetime.now()
+    heartbeats = read_heartbeats()
+    with connect(read_only=True) as connection:
+        transcript_stats = connection.execute(
+            """
+            SELECT count(*) AS processed,
+                   sum(CASE WHEN broadcast_pending = 1 THEN 1 ELSE 0 END) AS pending,
+                   min(CASE WHEN broadcast_pending = 1 THEN timestamp END) AS oldest_pending,
+                   max(CASE WHEN status = 'ready' THEN timestamp END) AS latest_ready,
+                   max(CASE WHEN broadcast_pending = 0 AND status = 'ready'
+                            THEN timestamp END) AS latest_delivered,
+                   max(last_broadcast_error) AS delivery_error
+            FROM transcripts
+            """
+        ).fetchone()
+        sync_stats = connection.execute(
+            """
+            SELECT count(*) AS synced,
+                   max(synced_at) AS latest_synced,
+                   coalesce(sum(source_size), 0) AS synced_bytes
+            FROM synced_files
+            """
+        ).fetchone()
+        recent_count = connection.execute(
+            "SELECT count(*) FROM transcripts WHERE timestamp >= ?",
+            ((now - timedelta(minutes=15)).isoformat(),),
+        ).fetchone()[0]
+
+    sync_heartbeat = heartbeats.get("sync")
+    worker_heartbeat = heartbeats.get("worker")
+    sync_details = (sync_heartbeat or {}).get("details", {})
+    worker_details = (worker_heartbeat or {}).get("details", {})
+    source_mounted = os.path.isdir(RECORDING_SOURCE_DIR)
+    if not source_mounted:
+        source_status = "critical"
+        source_summary = "Recording source is unavailable"
+    elif sync_heartbeat is None or sync_heartbeat["stale"]:
+        source_status = "caution"
+        source_summary = "Source is mounted, but its sync heartbeat is stale"
+    else:
+        source_status = "healthy"
+        source_summary = "Recording source is reachable"
+
+    if sync_heartbeat is None or sync_heartbeat["stale"]:
+        sync_status = "critical"
+        sync_summary = "Recording sync is not reporting"
+    elif sync_heartbeat["status"] in {"error"}:
+        sync_status = "critical"
+        sync_summary = "Recording sync needs intervention"
+    elif sync_heartbeat["status"] in {"paused", "waiting"}:
+        sync_status = "caution"
+        sync_summary = "Recording sync is paused or waiting"
+    else:
+        sync_status = "healthy"
+        sync_summary = "Recording sync is current"
+
+    transcription_enabled = bool(load_settings().get("transcription_enabled", True))
+    queue_depth = int(worker_details.get("queue_depth") or 0)
+    rescue_depth = int(worker_details.get("rescue_queue_depth") or 0)
+    if not transcription_enabled:
+        transcription_status = "paused"
+        transcription_summary = "Transcription is intentionally paused"
+    elif worker_heartbeat is None or worker_heartbeat["stale"]:
+        transcription_status = "critical"
+        transcription_summary = "Transcription worker is not reporting"
+    elif worker_heartbeat["status"] == "error":
+        transcription_status = "critical"
+        transcription_summary = "Transcription worker reported an error"
+    elif queue_depth >= 100:
+        transcription_status = "caution"
+        transcription_summary = "The live transcription queue is growing"
+    else:
+        transcription_status = "healthy"
+        transcription_summary = "Transcription worker is ready"
+
+    pending_delivery = int(transcript_stats["pending"] or 0)
+    if pending_delivery >= 20:
+        delivery_status = "critical"
+        delivery_summary = "Dashboard delivery has a significant backlog"
+    elif pending_delivery:
+        delivery_status = "caution"
+        delivery_summary = "Some transcripts are waiting for delivery"
+    else:
+        delivery_status = "healthy"
+        delivery_summary = "Dashboard delivery is caught up"
+
+    try:
+        disk = shutil.disk_usage(AUDIO_DIR)
+        free_ratio = disk.free / disk.total if disk.total else 0
+        if disk.free < 1 * 1024**3:
+            storage_status = "critical"
+            storage_summary = "Less than 1 GB of recording storage remains"
+        elif disk.free < 5 * 1024**3 or free_ratio < 0.05:
+            storage_status = "caution"
+            storage_summary = "Recording storage is approaching its safety reserve"
+        else:
+            storage_status = "healthy"
+            storage_summary = "Recording storage has adequate free space"
+        storage_metrics = {
+            "free_bytes": disk.free,
+            "used_bytes": disk.used,
+            "total_bytes": disk.total,
+            "free_percent": round(free_ratio * 100, 1),
+        }
+    except OSError as exc:
+        storage_status = "critical"
+        storage_summary = "Recording storage cannot be inspected"
+        storage_metrics = {"error": str(exc)[:500]}
+
+    components = [
+        {
+            "id": "source",
+            "label": "Source",
+            "status": source_status,
+            "summary": source_summary,
+            "last_success_at": sync_stats["latest_synced"],
+            "heartbeat_age_seconds": (sync_heartbeat or {}).get("age_seconds"),
+            "queue_depth": int(sync_details.get("source_files") or 0),
+            "last_error": _heartbeat_problem(sync_heartbeat),
+            "action": "Reconnect or select the recording source, then verify read access.",
+            "console_service": "sync",
+            "metrics": {
+                "mounted": source_mounted,
+                "synced_files": sync_stats["synced"],
+                "source_files": sync_details.get("source_files"),
+            },
+        },
+        {
+            "id": "sync",
+            "label": "Sync",
+            "status": sync_status,
+            "summary": sync_summary,
+            "last_success_at": sync_stats["latest_synced"],
+            "heartbeat_age_seconds": (sync_heartbeat or {}).get("age_seconds"),
+            "queue_depth": max(
+                0,
+                int(sync_details.get("source_files") or 0)
+                - int(sync_stats["synced"] or 0),
+            ),
+            "last_error": _heartbeat_problem(sync_heartbeat),
+            "action": "Inspect sync events and retry after the source and destination are writable.",
+            "console_service": "sync",
+            "metrics": {
+                "copied_this_pass": sync_details.get("copied_this_pass", sync_details.get("copied", 0)),
+                "failed_this_pass": sync_details.get("failed", 0),
+                "synced_bytes": sync_stats["synced_bytes"],
+            },
+        },
+        {
+            "id": "transcription",
+            "label": "Transcription",
+            "status": transcription_status,
+            "summary": transcription_summary,
+            "last_success_at": transcript_stats["latest_ready"],
+            "heartbeat_age_seconds": (worker_heartbeat or {}).get("age_seconds"),
+            "queue_depth": queue_depth,
+            "last_error": _heartbeat_problem(worker_heartbeat),
+            "action": "Inspect worker events; restart only after active work is safely clear.",
+            "console_service": "worker",
+            "metrics": {
+                "processed": transcript_stats["processed"],
+                "rescue_queue_depth": rescue_depth,
+                "throughput_per_minute": round(recent_count / 15, 1),
+                "model": worker_details.get("model", RADIO_MODEL_SIZE),
+            },
+        },
+        {
+            "id": "delivery",
+            "label": "Delivery",
+            "status": delivery_status,
+            "summary": delivery_summary,
+            "last_success_at": transcript_stats["latest_delivered"],
+            "heartbeat_age_seconds": (worker_heartbeat or {}).get("age_seconds"),
+            "queue_depth": pending_delivery,
+            "last_error": str(transcript_stats["delivery_error"] or "")[:500],
+            "action": "Verify the dashboard server, then allow durable delivery retries to catch up.",
+            "console_service": "server",
+            "metrics": {"oldest_waiting_at": transcript_stats["oldest_pending"]},
+        },
+        {
+            "id": "storage",
+            "label": "Storage",
+            "status": storage_status,
+            "summary": storage_summary,
+            "last_success_at": now.isoformat(),
+            "heartbeat_age_seconds": None,
+            "queue_depth": None,
+            "last_error": str(storage_metrics.get("error") or ""),
+            "action": "Free or extend recording storage before the safety reserve is reached.",
+            "console_service": "sync",
+            "metrics": storage_metrics,
+        },
+    ]
+    overall = "healthy"
+    if any(component["status"] == "critical" for component in components):
+        overall = "critical"
+    elif any(component["status"] in {"caution", "paused"} for component in components):
+        overall = "caution"
+    return {"status": overall, "generated_at": now.isoformat(), "components": components}
+
+
+def _redact_diagnostic_text(value):
+    text_value = str(value or "")
+    for path, replacement in (
+        (PROJECT_ROOT, "<project>"),
+        (AUDIO_DIR, "<recordings>"),
+        (RECORDING_SOURCE_DIR, "<source>"),
+        (os.path.expanduser("~"), "<home>"),
+    ):
+        if path:
+            text_value = text_value.replace(path, replacement)
+    text_value = re.sub(
+        r"(?i)(password|token|secret|authorization)(\s*[:=]\s*)[^\s,;]+",
+        r"\1\2<redacted>",
+        text_value,
+    )
+    return text_value
+
+
+def build_shift_handoff(hours=12):
+    generated_at = datetime.now()
+    cutoff = (generated_at - timedelta(hours=hours)).isoformat()
+    with connect(read_only=True) as connection:
+        incident_rows = connection.execute(
+            f"""
+            {INCIDENT_SUMMARY_SELECT}
+            WHERE i.status != 'resolved'
+            ORDER BY CASE i.severity
+                WHEN 'critical' THEN 4 WHEN 'urgent' THEN 3
+                WHEN 'caution' THEN 2 ELSE 1 END DESC,
+                i.updated_at DESC
+            """
+        ).fetchall()
+        alert_rows = connection.execute(
+            f"""
+            SELECT {ALERT_DETAIL_SELECT}
+            FROM alert_events ae
+            JOIN alert_rules ar ON ar.id = ae.rule_id
+            JOIN transcripts t ON t.id = ae.transcript_id
+            WHERE ae.status IN ('open', 'acknowledged')
+            ORDER BY CASE ae.severity
+                WHEN 'critical' THEN 4 WHEN 'urgent' THEN 3
+                WHEN 'caution' THEN 2 ELSE 1 END DESC,
+                ae.created_at DESC
+            LIMIT 100
+            """
+        ).fetchall()
+        bookmark_rows = connection.execute(
+            f"""
+            SELECT {TRANSCRIPT_DETAIL_COLUMNS}
+            FROM transcripts
+            WHERE bookmarked = 1
+              AND coalesce(recorded_at, timestamp) >= ?
+            ORDER BY coalesce(recorded_at, timestamp) DESC, id DESC
+            LIMIT 100
+            """,
+            (cutoff,),
+        ).fetchall()
+    health = build_health_center()
+    return {
+        "generated_at": generated_at.isoformat(),
+        "window_hours": hours,
+        "incidents": [incident_row_to_dict(row) for row in incident_rows],
+        "alerts": [alert_row_to_dict(row) for row in alert_rows],
+        "bookmarks": [transcript_row_to_dict(row) for row in bookmark_rows],
+        "system_issues": [
+            component for component in health["components"]
+            if component["status"] != "healthy"
+        ],
+        "counts": {
+            "open_incidents": len(incident_rows),
+            "active_alerts": len(alert_rows),
+            "recent_bookmarks": len(bookmark_rows),
+            "system_issues": sum(
+                component["status"] != "healthy"
+                for component in health["components"]
+            ),
+        },
+    }
+
+
+def format_shift_handoff(report):
+    lines = [
+        "RADIO COMMAND CENTER SHIFT HANDOFF",
+        f"Generated: {report['generated_at']}",
+        f"Window: {report['window_hours']} hours",
+        "",
+        f"OPEN INCIDENTS ({report['counts']['open_incidents']})",
+    ]
+    for incident in report["incidents"]:
+        lines.append(
+            f"- [{incident['severity'].upper()}] {incident['title']} "
+            f"({incident['status']}; owner: {incident['owner_username'] or 'unassigned'}; "
+            f"{incident['open_task_count']} open tasks)"
+        )
+    lines.extend(["", f"ACTIVE ALERTS ({report['counts']['active_alerts']})"])
+    for alert in report["alerts"]:
+        lines.append(
+            f"- [{alert['severity'].upper()}] {alert['rule_name']} on "
+            f"{alert['channel'] or 'unknown channel'} ({alert['status']})"
+        )
+    lines.extend(["", f"RECENT BOOKMARKS ({report['counts']['recent_bookmarks']})"])
+    for transcript in report["bookmarks"]:
+        excerpt = " ".join(transcript["transcript_text"].split())[:140]
+        lines.append(f"- {transcript['channel'] or 'Unknown'}: {excerpt}")
+    lines.extend(["", f"SYSTEM ISSUES ({report['counts']['system_issues']})"])
+    for component in report["system_issues"]:
+        lines.append(f"- {component['label']}: {component['summary']}")
+    if len(lines) == 8:
+        lines.append("- No outstanding handoff items.")
+    return "\n".join(lines) + "\n"
+
+
 app.mount("/static", StaticFiles(directory=os.path.join(PROJECT_ROOT, "frontend")), name="static")
 app.mount("/audio", StaticFiles(directory=AUDIO_DIR), name="audio")
 
@@ -861,6 +1280,44 @@ async def setup_page():
     return read_html("setup.html")
 
 
+@app.get("/api/setup/status")
+def setup_status():
+    if not setup_required():
+        raise HTTPException(status_code=409, detail="Initial setup is complete")
+    return readiness_status()
+
+
+@app.post("/api/setup/configure")
+def configure_initial_setup(payload: SetupConfigurationPayload):
+    if not setup_required():
+        raise HTTPException(status_code=409, detail="Initial setup is complete")
+    source = validate_source(payload.source_dir)
+    if not source["readable"]:
+        raise HTTPException(status_code=400, detail=source["error"])
+    minimum_free_gb = max(2, min(500, int(payload.minimum_free_gb)))
+    save_settings(
+        {
+            "source_dir": source["path"],
+            "transcription_enabled": bool(payload.transcription_enabled),
+            "minimum_free_bytes": minimum_free_gb * 1024**3,
+            "setup_step": max(1, min(7, int(payload.setup_step))),
+        }
+    )
+    return readiness_status()
+
+
+@app.post("/api/setup/models/{model_key}")
+def setup_model_download(model_key: str):
+    if not setup_required():
+        raise HTTPException(status_code=409, detail="Initial setup is complete")
+    if model_key != "medium":
+        raise HTTPException(status_code=400, detail="Only Medium is required during setup")
+    try:
+        return start_download(model_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/setup")
 async def initial_setup(payload: SetupPayload):
     try:
@@ -872,6 +1329,7 @@ async def initial_setup(payload: SetupPayload):
     except ValueError as exc:
         status_code = 409 if "already been completed" in str(exc) else 400
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    save_settings({"setup_step": 8, "setup_completed_at": datetime.now().isoformat()})
     response = JSONResponse({"status": "success"})
     response.set_cookie(
         SESSION_COOKIE,
@@ -941,6 +1399,9 @@ def get_current_profile(request: Request):
             "alerts": role_allows(session, "viewer"),
             "acknowledge_alerts": role_allows(session, "operator"),
             "manage_alert_rules": role_allows(session, "supervisor"),
+            "incidents": role_allows(session, "viewer"),
+            "manage_incidents": role_allows(session, "operator"),
+            "diagnostics": role_allows(session, "admin"),
         },
     }
 
@@ -954,6 +1415,16 @@ def health_check():
     }
 
 
+@app.get("/api/readiness")
+def deployment_readiness(request: Request):
+    require_role(request, "admin")
+    result = readiness_status()
+    for check in result["checks"]:
+        if check["id"] == "administrator":
+            check["ready"] = True
+    return result
+
+
 @app.get("/api/stats")
 def get_stats():
     with stats_lock:
@@ -962,6 +1433,102 @@ def get_stats():
         payload = build_stats()
         stats_cache.update({"at": time.time(), "payload": payload})
         return payload
+
+
+@app.get("/api/health-center")
+def get_health_center(request: Request):
+    require_role(request, "viewer")
+    return build_health_center()
+
+
+@app.get("/api/shift-handoff")
+def get_shift_handoff(
+    request: Request,
+    hours: int = 12,
+    format: str = "json",
+):
+    require_role(request, "viewer")
+    bounded_hours = max(1, min(int(hours), 72))
+    report = build_shift_handoff(bounded_hours)
+    if format == "text":
+        return StreamingResponse(
+            iter([format_shift_handoff(report)]),
+            media_type="text/plain; charset=utf-8",
+            headers={
+                "Content-Disposition": "attachment; filename=radio-shift-handoff.txt"
+            },
+        )
+    if format != "json":
+        raise HTTPException(status_code=400, detail="Unsupported handoff format")
+    return report
+
+
+@app.get("/api/diagnostics.zip")
+def export_diagnostics(request: Request):
+    session = require_role(request, "admin")
+    generated_at = datetime.now()
+    health = build_health_center()
+    handoff = build_shift_handoff(12)
+    with connect(read_only=True) as connection:
+        integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
+        counts = {}
+        for table in (
+            "transcripts",
+            "events",
+            "alert_events",
+            "incidents",
+            "incident_tasks",
+        ):
+            counts[table] = connection.execute(
+                f"SELECT count(*) FROM {table}"
+            ).fetchone()[0]
+    diagnostic_summary = {
+        "generated_at": generated_at.isoformat(),
+        "generated_by": session["u"],
+        "application": app.title,
+        "engine": RADIO_ENGINE,
+        "model": RADIO_MODEL_SIZE,
+        "database_quick_check": integrity,
+        "record_counts": counts,
+    }
+    diagnostic_handoff = {
+        **handoff,
+        "bookmarks": [
+            {**bookmark, "transcript_text": "<redacted transmission>"}
+            for bookmark in handoff["bookmarks"]
+        ],
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "diagnostics.json",
+            json.dumps(diagnostic_summary, indent=2, sort_keys=True),
+        )
+        archive.writestr(
+            "health-center.json",
+            json.dumps(health, indent=2, sort_keys=True),
+        )
+        archive.writestr(
+            "shift-handoff.txt",
+            _redact_diagnostic_text(format_shift_handoff(diagnostic_handoff)),
+        )
+        for service in LOG_FILE_NAMES:
+            entries = console_log_entries(service, 300)
+            lines = [
+                _redact_diagnostic_text(
+                    f"{entry['timestamp']} {entry['level'].upper()} {entry['message']}"
+                )
+                for entry in entries
+            ]
+            archive.writestr(f"logs/{service}.log", "\n".join(lines) + "\n")
+    audit(session["u"], "export_diagnostics", details={"generated_at": generated_at.isoformat()})
+    buffer.seek(0)
+    filename = f"radio-diagnostics-{generated_at:%Y%m%d-%H%M%S}.zip"
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 @app.get("/api/console")
@@ -983,6 +1550,7 @@ def get_console(
 def get_history(
     request: Request,
     q: str = Query("", max_length=200),
+    channel: str = Query("", max_length=160),
     after_id: Optional[int] = None,
     before_id: Optional[int] = None,
     limit: int = 500,
@@ -1008,6 +1576,7 @@ def get_history(
         ).fetchone()[0]
     rows = query_transcripts(
         query=q.strip(),
+        channel=channel.strip(),
         after_id=after_id,
         before_id=before_id,
         limit=limit,
@@ -1245,6 +1814,149 @@ def export_count(
     return {"count": row_count, "through_id": through_id}
 
 
+@app.get("/api/models/status")
+def model_status(request: Request):
+    require_role(request, "viewer")
+    return {"models": all_model_statuses(), "queue": queue_summary()}
+
+
+@app.get("/api/quality-analytics")
+def get_quality_analytics(request: Request):
+    require_role(request, "supervisor")
+    return {"analytics": quality_analytics(), "profiles": list_profiles()}
+
+
+@app.put("/api/transcription-profiles/{channel}")
+def update_transcription_profile(
+    channel: str,
+    payload: TranscriptionProfilePayload,
+    request: Request,
+):
+    session = require_role(request, "admin")
+    try:
+        profile = save_profile(channel, payload.model_dump(), session["u"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit(session["u"], "save_transcription_profile", details={"channel": channel})
+    return profile
+
+
+@app.get("/api/backups")
+def backup_history(request: Request):
+    require_role(request, "admin")
+    return {"backups": list_backups()}
+
+
+@app.post("/api/backups")
+def make_backup(request: Request):
+    session = require_role(request, "admin")
+    try:
+        backup = create_backup(session["u"])
+    except Exception as exc:
+        logger.exception("Backup failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    audit(session["u"], "create_backup", details={"backup_id": backup["id"]})
+    return backup
+
+
+@app.post("/api/backups/{backup_id}/verify")
+def check_backup(backup_id: int, request: Request):
+    session = require_role(request, "admin")
+    try:
+        backup = verify_backup(backup_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    audit(session["u"], "verify_backup", details={"backup_id": backup_id})
+    return backup
+
+
+@app.post("/api/backups/{backup_id}/restore-drill")
+def check_restore(backup_id: int, request: Request):
+    session = require_role(request, "admin")
+    try:
+        result = restore_drill(backup_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    audit(session["u"], "restore_drill", details={"backup_id": backup_id})
+    return result
+
+
+@app.post("/api/models/{model_key}/download")
+def download_model(model_key: str, request: Request):
+    session = require_role(request, "admin")
+    try:
+        result = start_download(model_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    audit(session["u"], "start_model_download", details={"model": model_key})
+    return result
+
+
+@app.patch("/api/models/{model_key}/download")
+def update_model_download(
+    model_key: str,
+    payload: ModelControlPayload,
+    request: Request,
+):
+    session = require_role(request, "admin")
+    try:
+        result = control_download(model_key, payload.action)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit(
+        session["u"],
+        "control_model_download",
+        details={"model": model_key, "action": payload.action},
+    )
+    return result
+
+
+@app.get("/api/transcription/queue")
+def transcription_queue_status(request: Request):
+    require_role(request, "operator")
+    return queue_summary()
+
+
+@app.get("/api/glossaries")
+def get_glossaries(request: Request):
+    require_role(request, "operator")
+    with connect(read_only=True) as connection:
+        channels = [
+            row["channel"]
+            for row in connection.execute(
+                """
+                SELECT DISTINCT channel FROM transcripts
+                WHERE channel IS NOT NULL AND channel != ''
+                ORDER BY lower(channel)
+                """
+            ).fetchall()
+        ]
+    return {"glossaries": list_glossaries(), "channels": channels}
+
+
+@app.put("/api/glossaries/{channel}")
+def update_glossary(channel: str, payload: GlossaryPayload, request: Request):
+    session = require_role(request, "supervisor")
+    try:
+        result = save_glossary(
+            channel,
+            payload.terms,
+            payload.language,
+            session["u"],
+            payload.version,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    audit(session["u"], "save_channel_glossary", details={"channel": channel})
+    return result
+
+
 @app.get("/api/transcripts/{transcript_id}")
 def get_transcript_detail(transcript_id: int, request: Request):
     require_role(request, "viewer")
@@ -1264,6 +1976,16 @@ def get_transcript_detail(transcript_id: int, request: Request):
             """,
             (transcript_id,),
         ).fetchall()
+        segment_rows = connection.execute(
+            """
+            SELECT result_kind, segment_index, start_seconds, end_seconds,
+                   text, confidence
+            FROM transcript_segments
+            WHERE transcript_id = ?
+            ORDER BY result_kind, segment_index
+            """,
+            (transcript_id,),
+        ).fetchall()
     if row is None:
         raise HTTPException(status_code=404, detail="Transmission not found")
     result = transcript_row_to_dict(row)
@@ -1278,7 +2000,123 @@ def get_transcript_detail(transcript_id: int, request: Request):
         }
         for history in history_rows
     ]
+    result["segments"] = {"primary": [], "retry": []}
+    for segment in segment_rows:
+        result["segments"].setdefault(segment["result_kind"], []).append(dict(segment))
     return result
+
+
+@app.patch("/api/transcripts/{transcript_id}/selection")
+async def select_transcript_result(
+    transcript_id: int,
+    payload: TranscriptSelectionPayload,
+    request: Request,
+):
+    session = require_role(request, "supervisor")
+    if payload.selection not in {"primary", "retry"}:
+        raise HTTPException(status_code=400, detail="Choose Medium or Large V3")
+    now = datetime.now().isoformat()
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        before_row = connection.execute(
+            f"SELECT {TRANSCRIPT_DETAIL_COLUMNS} FROM transcripts WHERE id = ?",
+            (transcript_id,),
+        ).fetchone()
+        if before_row is None:
+            raise HTTPException(status_code=404, detail="Transmission not found")
+        if payload.version != before_row["version"]:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "This transmission changed in another session",
+                    "current": transcript_row_to_dict(before_row),
+                },
+            )
+        if payload.selection == "retry" and not (before_row["retry_transcript_text"] or "").strip():
+            raise HTTPException(status_code=400, detail="No Large V3 result is available")
+
+        if payload.selection == "primary":
+            text = before_row["raw_transcript_text"] or before_row["transcript_text"]
+            score = before_row["primary_quality_score"]
+            reason = before_row["primary_quality_reason"] or ""
+            metrics = before_row["primary_quality_metrics"] or "{}"
+            status = before_row["primary_status"] or assess_transcript(text)["status"]
+            model = before_row["primary_model"] or before_row["transcription_model"]
+            selection_reason = f"Medium selected manually by {session['u']}"
+        else:
+            text = before_row["retry_transcript_text"]
+            score = before_row["retry_quality_score"]
+            reason = before_row["retry_quality_reason"] or ""
+            metrics = before_row["retry_quality_metrics"] or "{}"
+            status = assess_transcript(text)["status"]
+            model = before_row["retry_model"]
+            selection_reason = f"Large V3 selected manually by {session['u']}"
+        connection.execute(
+            """
+            UPDATE transcripts
+            SET transcript_text = ?, quality_score = ?, quality_reason = ?,
+                quality_metrics = ?, status = ?, transcription_model = ?,
+                selected_transcript = ?, selection_reason = ?,
+                retry_status = CASE
+                    WHEN ? = 'retry' THEN 'selected' ELSE 'kept_primary'
+                END,
+                broadcast_pending = CASE WHEN ? = 'ready' THEN 1 ELSE broadcast_pending END,
+                version = version + 1
+            WHERE id = ?
+            """,
+            (
+                text,
+                score,
+                reason,
+                metrics,
+                status,
+                model,
+                payload.selection,
+                selection_reason,
+                payload.selection,
+                status,
+                transcript_id,
+            ),
+        )
+        row = connection.execute(
+            f"SELECT {TRANSCRIPT_DETAIL_COLUMNS} FROM transcripts WHERE id = ?",
+            (transcript_id,),
+        ).fetchone()
+        before_payload = transcript_row_to_dict(before_row)
+        after_payload = transcript_row_to_dict(row)
+        connection.execute(
+            """
+            INSERT INTO transcript_versions(
+                transcript_id, version, changed_at, changed_by,
+                change_type, before_json, after_json
+            ) VALUES (?, ?, ?, ?, 'model_selection', ?, ?)
+            """,
+            (
+                transcript_id,
+                row["version"],
+                now,
+                session["u"],
+                json.dumps(before_payload, separators=(",", ":"), sort_keys=True),
+                json.dumps(after_payload, separators=(",", ":"), sort_keys=True),
+            ),
+        )
+        event, _ = record_event(
+            connection,
+            "transcript.updated",
+            resource_type="transcript",
+            resource_id=transcript_id,
+            actor=session["u"],
+            payload={"transcript": after_payload, "change_type": "model_selection"},
+        )
+        connection.commit()
+    audit(
+        session["u"],
+        "select_transcript_model",
+        transcript_id,
+        {"selection": payload.selection},
+    )
+    await manager.broadcast(event)
+    return after_payload
 
 
 @app.patch("/api/transcripts/{transcript_id}")
@@ -2291,6 +3129,443 @@ def save_notification_preferences(
         )
         connection.commit()
     return {"configuration": payload.configuration, "updated_at": now}
+
+
+def validate_incident_payload(payload):
+    title = payload.title.strip()
+    if not 1 <= len(title) <= 160:
+        raise HTTPException(status_code=400, detail="Incident title must be 1–160 characters")
+    if payload.severity not in INCIDENT_SEVERITIES:
+        raise HTTPException(status_code=400, detail="Invalid incident severity")
+    if payload.status not in INCIDENT_STATUSES:
+        raise HTTPException(status_code=400, detail="Invalid incident status")
+    owner = (payload.owner_username or "").strip() or None
+    if owner:
+        valid_owners = {
+            user["username"]
+            for user in list_users()
+            if user["active"] and user["role"] in {"operator", "supervisor", "admin"}
+        }
+        if owner not in valid_owners:
+            raise HTTPException(status_code=400, detail="Incident owner is unavailable")
+    tags = []
+    for value in payload.tags:
+        tag = str(value).strip()[:40]
+        if tag and tag.casefold() not in {item.casefold() for item in tags}:
+            tags.append(tag)
+    if len(tags) > 20:
+        raise HTTPException(status_code=400, detail="Incidents support at most 20 tags")
+    started_at = payload.started_at or datetime.now().isoformat()
+    try:
+        datetime.fromisoformat(started_at)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid incident start time") from exc
+    return {
+        "title": title,
+        "severity": payload.severity,
+        "status": payload.status,
+        "owner_username": owner,
+        "location": payload.location.strip()[:200],
+        "summary": payload.summary.strip()[:4000],
+        "tags_json": json.dumps(tags, separators=(",", ":")),
+        "started_at": started_at,
+    }
+
+
+def validate_incident_assignee(username):
+    assignee = (username or "").strip() or None
+    if assignee is None:
+        return None
+    valid_assignees = {
+        user["username"]
+        for user in list_users()
+        if user["active"] and user["role"] in {"operator", "supervisor", "admin"}
+    }
+    if assignee not in valid_assignees:
+        raise HTTPException(status_code=400, detail="Incident assignee is unavailable")
+    return assignee
+
+
+def validate_optional_datetime(value, label):
+    normalized = (value or "").strip() or None
+    if normalized:
+        try:
+            datetime.fromisoformat(normalized)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid {label}") from exc
+    return normalized
+
+
+@app.get("/api/incidents")
+def get_incidents(
+    request: Request,
+    status: str = "open",
+    owner: str = "",
+    q: str = Query("", max_length=160),
+):
+    require_role(request, "viewer")
+    clauses = []
+    parameters = []
+    if status == "open":
+        clauses.append("i.status != 'resolved'")
+    elif status != "all":
+        if status not in INCIDENT_STATUSES:
+            raise HTTPException(status_code=400, detail="Invalid incident status filter")
+        clauses.append("i.status = ?")
+        parameters.append(status)
+    if owner:
+        clauses.append("i.owner_username = ?")
+        parameters.append(owner)
+    query = q.strip()
+    if query:
+        clauses.append("(i.title LIKE ? OR i.location LIKE ? OR i.summary LIKE ?)")
+        pattern = f"%{query}%"
+        parameters.extend((pattern, pattern, pattern))
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with connect(read_only=True) as connection:
+        rows = connection.execute(
+            f"""
+            {INCIDENT_SUMMARY_SELECT}
+            {where}
+            ORDER BY CASE i.severity
+                WHEN 'critical' THEN 4 WHEN 'urgent' THEN 3
+                WHEN 'caution' THEN 2 ELSE 1 END DESC,
+                i.updated_at DESC, i.id DESC
+            LIMIT 500
+            """,
+            parameters,
+        ).fetchall()
+    return {"items": [incident_row_to_dict(row) for row in rows], "count": len(rows)}
+
+
+@app.get("/api/incidents/{incident_id}")
+def get_incident_detail(incident_id: int, request: Request):
+    require_role(request, "viewer")
+    with connect(read_only=True) as connection:
+        detail = incident_detail(connection, incident_id, transcript_row_to_dict)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    return detail
+
+
+@app.post("/api/incidents")
+async def create_incident(payload: IncidentPayload, request: Request):
+    session = require_role(request, "operator")
+    values = validate_incident_payload(payload)
+    now = datetime.now().isoformat()
+    with connect() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO incidents(
+                title, severity, status, owner_username, location, summary,
+                tags_json, started_at, resolved_at, version,
+                created_by, updated_by, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+            """,
+            (
+                values["title"], values["severity"], values["status"],
+                values["owner_username"], values["location"], values["summary"],
+                values["tags_json"], values["started_at"],
+                now if values["status"] == "resolved" else None,
+                session["u"], session["u"], now, now,
+            ),
+        )
+        incident = get_incident(connection, cursor.lastrowid)
+        event, _ = record_event(
+            connection,
+            "incident.created",
+            resource_type="incident",
+            resource_id=incident["id"],
+            actor=session["u"],
+            payload={"incident": incident},
+        )
+        connection.commit()
+    audit(session["u"], "create_incident", details={"incident_id": incident["id"]})
+    await manager.broadcast(event)
+    return incident
+
+
+@app.patch("/api/incidents/{incident_id}")
+async def update_incident(
+    incident_id: int,
+    payload: IncidentPayload,
+    request: Request,
+):
+    session = require_role(request, "operator")
+    if payload.version is None:
+        raise HTTPException(status_code=428, detail="Incident version is required")
+    values = validate_incident_payload(payload)
+    now = datetime.now().isoformat()
+    with connect() as connection:
+        current = get_incident(connection, incident_id)
+        if current is None:
+            raise HTTPException(status_code=404, detail="Incident not found")
+        if current["version"] != payload.version:
+            return JSONResponse(
+                status_code=409,
+                content={"detail": "Incident changed by another operator", "current": current},
+            )
+        resolved_at = (
+            current["resolved_at"] or now
+            if values["status"] == "resolved"
+            else None
+        )
+        connection.execute(
+            """
+            UPDATE incidents
+            SET title = ?, severity = ?, status = ?, owner_username = ?,
+                location = ?, summary = ?, tags_json = ?, started_at = ?,
+                resolved_at = ?, version = version + 1,
+                updated_by = ?, updated_at = ?
+            WHERE id = ? AND version = ?
+            """,
+            (
+                values["title"], values["severity"], values["status"],
+                values["owner_username"], values["location"], values["summary"],
+                values["tags_json"], values["started_at"], resolved_at,
+                session["u"], now, incident_id, payload.version,
+            ),
+        )
+        incident = get_incident(connection, incident_id)
+        event, _ = record_event(
+            connection,
+            "incident.updated",
+            resource_type="incident",
+            resource_id=incident_id,
+            actor=session["u"],
+            payload={"incident": incident},
+        )
+        connection.commit()
+    audit(session["u"], "update_incident", details={"incident_id": incident_id})
+    await manager.broadcast(event)
+    return incident
+
+
+@app.post("/api/incidents/{incident_id}/transcripts")
+async def add_incident_transcript(
+    incident_id: int,
+    payload: IncidentTranscriptPayload,
+    request: Request,
+):
+    session = require_role(request, "operator")
+    now = datetime.now().isoformat()
+    with connect() as connection:
+        if get_incident(connection, incident_id) is None:
+            raise HTTPException(status_code=404, detail="Incident not found")
+        transcript = connection.execute(
+            "SELECT id FROM transcripts WHERE id = ?", (payload.transcript_id,)
+        ).fetchone()
+        if transcript is None:
+            raise HTTPException(status_code=404, detail="Transmission not found")
+        cursor = connection.execute(
+            """
+            INSERT OR IGNORE INTO incident_transcripts(
+                incident_id, transcript_id, added_by, added_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (incident_id, payload.transcript_id, session["u"], now),
+        )
+        if cursor.rowcount != 1:
+            raise HTTPException(status_code=409, detail="Transmission is already linked")
+        incident = get_incident(connection, incident_id)
+        event, _ = record_event(
+            connection,
+            "incident.transcript_added",
+            resource_type="incident",
+            resource_id=incident_id,
+            actor=session["u"],
+            payload={"incident": incident, "transcript_id": payload.transcript_id},
+        )
+        connection.commit()
+    audit(session["u"], "link_incident_transcript", payload.transcript_id, {"incident_id": incident_id})
+    await manager.broadcast(event)
+    return incident
+
+
+@app.delete("/api/incidents/{incident_id}/transcripts/{transcript_id}")
+async def remove_incident_transcript(
+    incident_id: int,
+    transcript_id: int,
+    request: Request,
+):
+    session = require_role(request, "operator")
+    with connect() as connection:
+        cursor = connection.execute(
+            "DELETE FROM incident_transcripts WHERE incident_id = ? AND transcript_id = ?",
+            (incident_id, transcript_id),
+        )
+        if cursor.rowcount != 1:
+            raise HTTPException(status_code=404, detail="Incident transmission link not found")
+        incident = get_incident(connection, incident_id)
+        event, _ = record_event(
+            connection,
+            "incident.transcript_removed",
+            resource_type="incident",
+            resource_id=incident_id,
+            actor=session["u"],
+            payload={"incident": incident, "transcript_id": transcript_id},
+        )
+        connection.commit()
+    await manager.broadcast(event)
+    return incident
+
+
+@app.post("/api/incidents/{incident_id}/tasks")
+async def create_incident_task(
+    incident_id: int,
+    payload: IncidentTaskPayload,
+    request: Request,
+):
+    session = require_role(request, "operator")
+    description = payload.description.strip()
+    if not 1 <= len(description) <= 500:
+        raise HTTPException(status_code=400, detail="Task description must be 1–500 characters")
+    assignee = validate_incident_assignee(payload.assigned_to)
+    due_at = validate_optional_datetime(payload.due_at, "task due time")
+    now = datetime.now().isoformat()
+    with connect() as connection:
+        if get_incident(connection, incident_id) is None:
+            raise HTTPException(status_code=404, detail="Incident not found")
+        cursor = connection.execute(
+            """
+            INSERT INTO incident_tasks(
+                incident_id, description, status, assigned_to, due_at,
+                version, created_by, updated_by, created_at, updated_at
+            ) VALUES (?, ?, 'open', ?, ?, 1, ?, ?, ?, ?)
+            """,
+            (
+                incident_id, description, assignee,
+                due_at, session["u"], session["u"], now, now,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM incident_tasks WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone()
+        task = task_row_to_dict(row)
+        event, _ = record_event(
+            connection,
+            "incident.task_created",
+            resource_type="incident",
+            resource_id=incident_id,
+            actor=session["u"],
+            payload={"task": task},
+        )
+        connection.commit()
+    await manager.broadcast(event)
+    return task
+
+
+@app.patch("/api/incident-tasks/{task_id}")
+async def update_incident_task(
+    task_id: int,
+    payload: IncidentTaskUpdatePayload,
+    request: Request,
+):
+    session = require_role(request, "operator")
+    now = datetime.now().isoformat()
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM incident_tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Incident task not found")
+        current = task_row_to_dict(row)
+        if current["version"] != payload.version:
+            return JSONResponse(
+                status_code=409,
+                content={"detail": "Task changed by another operator", "current": current},
+            )
+        status = payload.status or current["status"]
+        if status not in INCIDENT_TASK_STATUSES:
+            raise HTTPException(status_code=400, detail="Invalid incident task status")
+        description = (
+            payload.description.strip()
+            if payload.description is not None
+            else current["description"]
+        )
+        if not 1 <= len(description) <= 500:
+            raise HTTPException(status_code=400, detail="Task description must be 1–500 characters")
+        fields_set = getattr(payload, "model_fields_set", None)
+        if fields_set is None:
+            fields_set = getattr(payload, "__fields_set__", set())
+        assigned_to = (
+            validate_incident_assignee(payload.assigned_to)
+            if "assigned_to" in fields_set
+            else current["assigned_to"]
+        )
+        due_at = (
+            validate_optional_datetime(payload.due_at, "task due time")
+            if "due_at" in fields_set
+            else current["due_at"]
+        )
+        connection.execute(
+            """
+            UPDATE incident_tasks
+            SET description = ?, status = ?, assigned_to = ?, due_at = ?,
+                version = version + 1, updated_by = ?, updated_at = ?
+            WHERE id = ? AND version = ?
+            """,
+            (
+                description, status, assigned_to or None, due_at or None,
+                session["u"], now, task_id, payload.version,
+            ),
+        )
+        updated_row = connection.execute(
+            "SELECT * FROM incident_tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        task = task_row_to_dict(updated_row)
+        event, _ = record_event(
+            connection,
+            "incident.task_updated",
+            resource_type="incident",
+            resource_id=task["incident_id"],
+            actor=session["u"],
+            payload={"task": task},
+        )
+        connection.commit()
+    await manager.broadcast(event)
+    return task
+
+
+@app.post("/api/incidents/{incident_id}/notes")
+async def add_incident_note(
+    incident_id: int,
+    payload: IncidentNotePayload,
+    request: Request,
+):
+    session = require_role(request, "operator")
+    note = payload.note.strip()
+    if not 1 <= len(note) <= 4000:
+        raise HTTPException(status_code=400, detail="Incident note must be 1–4000 characters")
+    now = datetime.now().isoformat()
+    with connect() as connection:
+        if get_incident(connection, incident_id) is None:
+            raise HTTPException(status_code=404, detail="Incident not found")
+        cursor = connection.execute(
+            """
+            INSERT INTO incident_notes(incident_id, note, created_by, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (incident_id, note, session["u"], now),
+        )
+        note_payload = {
+            "id": cursor.lastrowid,
+            "incident_id": incident_id,
+            "note": note,
+            "created_by": session["u"],
+            "created_at": now,
+        }
+        event, _ = record_event(
+            connection,
+            "incident.note_added",
+            resource_type="incident",
+            resource_id=incident_id,
+            actor=session["u"],
+            payload={"note": note_payload},
+        )
+        connection.commit()
+    await manager.broadcast(event)
+    return note_payload
 
 
 @app.get("/api/users")

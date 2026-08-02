@@ -160,3 +160,27 @@ def choose_retry_result(primary_text, primary_quality, retry_text, retry_quality
     if use_retry:
         return retry_text, retry_quality, True
     return primary_text, primary_quality, False
+
+
+def explain_retry_trigger(quality):
+    reason = (quality or {}).get("reason") or ""
+    if reason:
+        return f"Large V3 retry requested because {reason[0].lower()}{reason[1:]}"
+    score = round(float((quality or {}).get("score", 0.0)) * 100)
+    return f"Large V3 retry requested because Medium quality was {score}%"
+
+
+def explain_retry_selection(primary_quality, retry_quality, used_retry):
+    primary_score = round(float(primary_quality.get("score", 0.0)) * 100)
+    retry_score = round(float(retry_quality.get("score", 0.0)) * 100)
+    if used_retry:
+        return (
+            "Large V3 selected automatically because it produced a ready "
+            f"result and improved quality from {primary_score}% to {retry_score}%"
+        )
+    if retry_quality.get("status") == "blank":
+        return "Medium kept because the Large V3 retry did not detect usable speech"
+    return (
+        "Medium kept because the Large V3 retry did not improve quality enough "
+        f"({primary_score}% vs {retry_score}%)"
+    )

@@ -38,9 +38,15 @@ function phaseFourSetBadge(count) {
 function phaseFourOpenView() {
   dashboard.hidden = true;
   document.getElementById("archive-search-view").hidden = true;
+  document.getElementById("incident-workspace-view").hidden = true;
+  document.getElementById("health-center-view").hidden = true;
   phaseFourView.hidden = false;
   document.body.classList.add("alert-inbox-mode");
-  document.body.classList.remove("archive-search-mode");
+  document.body.classList.remove(
+    "archive-search-mode",
+    "incident-workspace-mode",
+    "health-center-mode",
+  );
   phaseFourLoadAlerts().catch((error) => showToast(error.message, "danger"));
 }
 

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Radio Command Center | Live Ops</title>
 
-    <link rel="stylesheet" href="/static/css/style.css?v=20260730-9" />
+    <link rel="stylesheet" href="/static/css/style.css?v=20260801-2" />
   </head>
   <body>
     <header id="topbar">
@@ -31,6 +31,13 @@
           <div class="ops-detail">
             <span id="engine-status">Medium model · checking engine…</span>
             <span id="service-status" class="service-status">Checking worker services…</span>
+          </div>
+          <div id="health-chips" class="health-chips" aria-label="Operational health">
+            <button type="button" data-health-component="source">Source <span>—</span></button>
+            <button type="button" data-health-component="sync">Sync <span>—</span></button>
+            <button type="button" data-health-component="transcription">Transcription <span>—</span></button>
+            <button type="button" data-health-component="delivery">Delivery <span>—</span></button>
+            <button type="button" data-health-component="storage">Storage <span>—</span></button>
           </div>
         </section>
 
@@ -66,6 +73,17 @@
         </div>
 
         <div class="topbar-actions">
+          <button
+            id="incidents-button"
+            class="topbar-control-btn"
+            type="button"
+            aria-label="Incident workspace"
+            aria-controls="incident-workspace-view"
+          >
+            <span class="button-icon" aria-hidden="true">◆</span>
+            <span class="topbar-action-label">Incidents</span>
+            <span id="incident-active-count" class="alert-active-count" hidden>0</span>
+          </button>
           <button
             id="alerts-button"
             class="topbar-control-btn"
@@ -176,6 +194,9 @@
         <section class="control-card">
           <div class="section-title">Display Settings</div>
           <div class="control-options">
+            <button id="health-center-button" class="btn btn-quiet" type="button">
+              Open system health center
+            </button>
             <label class="checkbox-label">
               <div class="checkbox-inner">
                 <input type="checkbox" id="compact-mode-toggle" />
@@ -217,6 +238,28 @@
           <div id="keyword-list" class="keyword-list"></div>
         </section>
 
+        <section id="quality-control-card" class="control-card quality-control-card" hidden>
+          <div class="section-title section-title-row">
+            <span>Models &amp; radio terms</span>
+            <span id="quality-queue-summary" class="section-count">Checking…</span>
+          </div>
+          <div id="model-readiness-list" class="model-readiness-list" aria-live="polite"></div>
+          <div id="glossary-editor" class="glossary-editor" hidden>
+            <label>
+              <span>Channel</span>
+              <select id="glossary-channel" class="search-input"></select>
+            </label>
+            <label>
+              <span>Names, callsigns, and local terms</span>
+              <textarea id="glossary-terms" rows="3" maxlength="8000" placeholder="One term per line"></textarea>
+            </label>
+            <div class="filter-actions">
+              <button id="glossary-save-button" class="btn" type="button">Save terms</button>
+              <span id="glossary-save-status" class="section-count" role="status"></span>
+            </div>
+          </div>
+        </section>
+
         <section class="control-card date-control-card">
           <div class="section-title">Date &amp; Time</div>
           <div class="date-filter-grid">
@@ -246,6 +289,32 @@
         <section class="control-card feeds-section">
           <div class="section-title">Active Feeds</div>
           <div class="toggle-group" id="channel-toggles"></div>
+        </section>
+
+        <section id="recovery-control-card" class="control-card recovery-control-card" hidden>
+          <div class="section-title section-title-row">
+            <span>Deployment &amp; recovery</span>
+            <span id="readiness-summary" class="section-count">Checking…</span>
+          </div>
+          <div id="readiness-check-list" class="readiness-check-list"></div>
+          <div class="filter-actions">
+            <button id="backup-create-button" class="btn" type="button">Create verified backup</button>
+            <button id="backup-drill-button" class="btn btn-quiet" type="button" disabled>Run restore drill</button>
+          </div>
+          <div id="backup-status" class="section-count" role="status"></div>
+          <details id="quality-analytics-panel" class="quality-analytics-panel">
+            <summary>Transcription quality evaluation</summary>
+            <div id="quality-evaluation-summary"></div>
+            <div id="quality-channel-metrics"></div>
+            <div id="transcription-profile-editor" class="transcription-profile-editor">
+              <label>Channel <select id="transcription-profile-channel"></select></label>
+              <label><input id="profile-normalize-audio" type="checkbox" /> Normalize quiet audio</label>
+              <label><input id="profile-language-detect" type="checkbox" /> Detect language experimentally</label>
+              <label><input id="profile-denoise-audio" type="checkbox" /> Apply experimental noise gate</label>
+              <p id="profile-evaluation-gate"></p>
+              <button id="transcription-profile-save" class="btn btn-quiet" type="button">Save channel profile</button>
+            </div>
+          </details>
         </section>
 
         <section id="profile-admin-section" class="control-card profile-control-card" hidden>
@@ -445,6 +514,88 @@
       </div>
     </section>
 
+    <section
+      id="incident-workspace-view"
+      class="incident-workspace-view"
+      aria-label="Incident workspace"
+      hidden
+    >
+      <header class="incident-workspace-header">
+        <div>
+          <span class="archive-search-eyebrow">Coordinated operations</span>
+          <h2>Incident workspace</h2>
+          <div id="incident-workspace-summary" class="archive-search-summary">
+            Loading active incidents…
+          </div>
+        </div>
+        <div class="incident-header-actions">
+          <button id="incident-new-button" class="btn btn-primary" type="button">
+            New incident
+          </button>
+          <button id="shift-handoff-button" class="btn" type="button">
+            Shift handoff
+          </button>
+          <button id="incidents-back-board" class="btn btn-quiet" type="button">
+            Back to live board
+          </button>
+        </div>
+      </header>
+      <div class="incident-toolbar" aria-label="Incident filters">
+        <label>
+          <span>Status</span>
+          <select id="incident-filter-status">
+            <option value="open">Open incidents</option>
+            <option value="monitoring">Monitoring</option>
+            <option value="active">Active</option>
+            <option value="stabilized">Stabilized</option>
+            <option value="resolved">Resolved</option>
+            <option value="all">All incidents</option>
+          </select>
+        </label>
+        <label>
+          <span>Search</span>
+          <input id="incident-filter-query" type="search" placeholder="Title, location, or summary" />
+        </label>
+        <button id="incident-refresh-button" class="btn btn-quiet" type="button">Refresh</button>
+      </div>
+      <div class="incident-workspace-layout">
+        <div id="incident-list" class="incident-list" aria-live="polite"></div>
+        <article id="incident-detail" class="incident-detail" aria-live="polite">
+          <div class="incident-detail-empty">
+            <strong>Select an incident</strong>
+            <span>Linked transmissions, tasks, notes, and ownership will appear here.</span>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section
+      id="health-center-view"
+      class="health-center-view"
+      aria-label="System health center"
+      hidden
+    >
+      <header class="incident-workspace-header">
+        <div>
+          <span class="archive-search-eyebrow">Actionable system status</span>
+          <h2>Health center</h2>
+          <div id="health-center-summary" class="archive-search-summary">
+            Inspecting source, sync, transcription, delivery, and storage…
+          </div>
+        </div>
+        <div class="incident-header-actions">
+          <button id="health-export-diagnostics" class="btn" type="button" hidden>
+            Export diagnostics
+          </button>
+          <button id="health-refresh-button" class="btn btn-quiet" type="button">Refresh</button>
+          <button id="health-back-board" class="btn btn-quiet" type="button">
+            Back to live board
+          </button>
+        </div>
+      </header>
+      <div id="health-component-list" class="health-component-list" aria-live="polite"></div>
+    </section>
+
     <aside
       id="transmission-drawer"
       class="transmission-drawer"
@@ -477,6 +628,9 @@
           </button>
           <button id="drawer-copy-button" class="btn btn-quiet" type="button">
             Copy transcript
+          </button>
+          <button id="drawer-incident-button" class="btn btn-quiet" type="button">
+            Add to incident
           </button>
         </section>
 
@@ -515,14 +669,22 @@
 
         <section id="drawer-comparison-section" class="drawer-section" hidden>
           <h3>Model comparison</h3>
+          <p id="drawer-retry-reason" class="model-explanation"></p>
+          <p id="drawer-selection-reason" class="model-explanation"></p>
           <div class="transcript-comparison">
             <article>
               <h4>Original Medium result</h4>
               <div id="drawer-raw-transcript"></div>
+              <button id="drawer-select-primary" class="btn btn-quiet model-select-button" type="button">
+                Use Medium result
+              </button>
             </article>
             <article>
               <h4>Large V3 retry</h4>
               <div id="drawer-retry-transcript"></div>
+              <button id="drawer-select-retry" class="btn btn-quiet model-select-button" type="button">
+                Use Large V3 result
+              </button>
             </article>
           </div>
         </section>
@@ -821,6 +983,111 @@
       </form>
     </dialog>
 
+    <dialog id="incident-editor-dialog" class="workspace-dialog incident-editor-dialog">
+      <form method="dialog" class="dialog-shell">
+        <div class="dialog-header">
+          <div>
+            <span class="drawer-eyebrow">Operational coordination</span>
+            <h2 id="incident-editor-heading">New incident</h2>
+          </div>
+          <button class="drawer-icon-button" value="cancel" aria-label="Close incident editor">×</button>
+        </div>
+        <input id="incident-editor-id" type="hidden" />
+        <input id="incident-editor-version" type="hidden" />
+        <div class="incident-editor-grid">
+          <label class="incident-editor-wide">
+            <span>Title</span>
+            <input id="incident-editor-title" maxlength="160" required />
+          </label>
+          <label>
+            <span>Severity</span>
+            <select id="incident-editor-severity">
+              <option value="informational">Informational</option>
+              <option value="caution">Caution</option>
+              <option value="urgent">Urgent</option>
+              <option value="critical">Critical</option>
+            </select>
+          </label>
+          <label>
+            <span>Status</span>
+            <select id="incident-editor-status">
+              <option value="monitoring">Monitoring</option>
+              <option value="active">Active</option>
+              <option value="stabilized">Stabilized</option>
+              <option value="resolved">Resolved</option>
+            </select>
+          </label>
+          <label>
+            <span>Owner</span>
+            <select id="incident-editor-owner"><option value="">Unassigned</option></select>
+          </label>
+          <label>
+            <span>Started</span>
+            <input id="incident-editor-started" type="datetime-local" />
+          </label>
+          <label class="incident-editor-wide">
+            <span>Location</span>
+            <input id="incident-editor-location" maxlength="200" />
+          </label>
+          <label class="incident-editor-wide">
+            <span>Tags, separated by commas</span>
+            <input id="incident-editor-tags" />
+          </label>
+          <label class="incident-editor-wide">
+            <span>Summary</span>
+            <textarea id="incident-editor-summary" rows="5" maxlength="4000"></textarea>
+          </label>
+        </div>
+        <div class="drawer-action-row">
+          <button id="incident-editor-save" class="btn btn-primary" type="button">Save incident</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="incident-link-dialog" class="workspace-dialog incident-link-dialog">
+      <form method="dialog" class="dialog-shell">
+        <div class="dialog-header">
+          <div>
+            <span class="drawer-eyebrow">Transmission workflow</span>
+            <h2>Add to incident</h2>
+          </div>
+          <button class="drawer-icon-button" value="cancel" aria-label="Close incident picker">×</button>
+        </div>
+        <div id="incident-link-list" class="workspace-list"></div>
+        <button id="incident-link-create" class="btn btn-primary" type="button">
+          Create a new incident
+        </button>
+      </form>
+    </dialog>
+
+    <dialog id="shift-handoff-dialog" class="workspace-dialog shift-handoff-dialog">
+      <form method="dialog" class="dialog-shell">
+        <div class="dialog-header">
+          <div>
+            <span class="drawer-eyebrow">Continuity between teams</span>
+            <h2>Shift handoff</h2>
+          </div>
+          <button class="drawer-icon-button" value="cancel" aria-label="Close shift handoff">×</button>
+        </div>
+        <div class="shift-handoff-controls">
+          <label>
+            <span>Look-back window</span>
+            <select id="shift-handoff-hours">
+              <option value="4">4 hours</option>
+              <option value="8">8 hours</option>
+              <option value="12" selected>12 hours</option>
+              <option value="24">24 hours</option>
+              <option value="48">48 hours</option>
+            </select>
+          </label>
+          <button id="shift-handoff-refresh" class="btn" type="button">Generate</button>
+          <button id="shift-handoff-copy" class="btn btn-quiet" type="button">Copy report</button>
+          <button id="shift-handoff-download" class="btn btn-quiet" type="button">Download text</button>
+        </div>
+        <div id="shift-handoff-content" class="shift-handoff-content" aria-live="polite"></div>
+      </form>
+    </dialog>
+
     <section id="console-panel" class="console-panel" aria-label="Program console" hidden>
       <div class="console-header">
         <div>
@@ -847,8 +1114,15 @@
               <option value="info">Info</option>
             </select>
           </label>
+          <label>
+            <span>Search</span>
+            <input id="console-search" type="search" placeholder="Filter events" />
+          </label>
           <button id="console-pause-button" class="console-button" type="button">Pause</button>
           <button id="console-refresh-button" class="console-button" type="button">Refresh</button>
+          <button id="console-wrap-button" class="console-button" type="button">No wrap</button>
+          <button id="console-copy-button" class="console-button" type="button">Copy visible</button>
+          <button id="console-diagnostics-button" class="console-button" type="button">Diagnostics</button>
           <button id="console-clear-button" class="console-button" type="button">Clear view</button>
           <button id="console-close-button" class="console-button console-close-button" type="button" aria-label="Close console">×</button>
         </div>
@@ -862,9 +1136,13 @@
     </div>
     <div id="toast-container"></div>
 
-    <script src="/static/js/app.js?v=20260730-6"></script>
+    <script src="/static/js/app.js?v=20260801-2"></script>
     <script src="/static/js/phase2.js?v=20260730-2"></script>
     <script src="/static/js/phase3.js?v=20260730-1"></script>
     <script src="/static/js/phase4.js?v=20260730-1"></script>
+    <script src="/static/js/phase5.js?v=20260801-1"></script>
+    <script src="/static/js/phase6.js?v=20260801-1"></script>
+    <script src="/static/js/phase7.js?v=20260801-1"></script>
+    <script src="/static/js/phase8.js?v=20260801-1"></script>
   </body>
 </html>

@@ -4,7 +4,7 @@ import Foundation
 import WebKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate,
-    WKScriptMessageHandler, NSTableViewDataSource, NSTableViewDelegate {
+    WKScriptMessageHandler, NSTableViewDataSource, NSTableViewDelegate, NSToolbarDelegate {
     private struct ServiceSnapshot {
         let running: Bool
         let transcriptionEnabled: Bool
@@ -41,6 +41,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var updateCheckInFlight = false
     private var automaticUpdateChecked = false
     private var transcriptionEnabled = true
+    private var settingsWindow: NSWindow?
+    private var menuStatusItem: NSStatusItem?
     private let collapsedHeaderHeight: CGFloat = 46
     private let expandedHeaderHeight: CGFloat = 104
 
@@ -101,9 +103,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             defer: false
         )
         window.title = "Radio Command Center"
-        window.minSize = NSSize(width: 1040, height: 650)
+        window.minSize = NSSize(width: 760, height: 560)
         window.center()
         window.contentView = content
+        configureNativeToolbar()
+        configureStatusItem()
 
         appHeader = NSVisualEffectView(
             frame: NSRect(
@@ -281,6 +285,158 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let control = NSButton(title: title, target: self, action: action)
         control.bezelStyle = .rounded
         return control
+    }
+
+    private func configureNativeToolbar() {
+        let toolbar = NSToolbar(identifier: "RadioCommandCenterToolbar")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        toolbar.allowsUserCustomization = true
+        toolbar.autosavesConfiguration = true
+        window.toolbar = toolbar
+        window.toolbarStyle = .unified
+    }
+
+    private func configureStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.button?.title = "Radio ○"
+        item.button?.toolTip = "Radio Command Center status"
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Show Radio Command Center", action: #selector(showMainWindow), keyEquivalent: "")
+        menu.addItem(withTitle: "Copy Dashboard Address", action: #selector(copyDashboardAddress), keyEquivalent: "")
+        menu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        item.menu = menu
+        menuStatusItem = item
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.toggleSidebar, .flexibleSpace, .init("status"), .init("source"), .init("restart"),
+         .init("settings"), .init("copyAddress"), .init("reload"), .init("updates")]
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.toggleSidebar, .init("status"), .flexibleSpace, .init("source"), .init("restart"),
+         .init("settings"), .init("copyAddress"), .init("reload"), .init("updates")]
+    }
+
+    func toolbar(
+        _ toolbar: NSToolbar,
+        itemForItemIdentifier identifier: NSToolbarItem.Identifier,
+        willBeInsertedIntoToolbar flag: Bool
+    ) -> NSToolbarItem? {
+        let item = NSToolbarItem(itemIdentifier: identifier)
+        switch identifier.rawValue {
+        case NSToolbarItem.Identifier.toggleSidebar.rawValue:
+            item.label = "App Controls"
+            item.toolTip = "Show or hide app controls"
+            item.image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: "App controls")
+            item.target = self
+            item.action = #selector(toggleAppHeader)
+        case "status":
+            item.label = "Status"
+            item.toolTip = "Open system health"
+            item.image = NSImage(systemSymbolName: "waveform.path.ecg", accessibilityDescription: "System status")
+            item.target = self
+            item.action = #selector(openHealthCenter)
+        case "source":
+            item.label = "Recording Source"
+            item.toolTip = "Choose the recording source folder"
+            item.image = NSImage(systemSymbolName: "externaldrive", accessibilityDescription: "Choose recording source")
+            item.target = self
+            item.action = #selector(chooseSource)
+        case "restart":
+            item.label = "Restart"
+            item.toolTip = "Restart Radio Command Center services"
+            item.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Restart services")
+            item.target = self
+            item.action = #selector(restartServices)
+        case "settings":
+            item.label = "Settings"
+            item.toolTip = "Open Radio Command Center settings"
+            item.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Settings")
+            item.target = self
+            item.action = #selector(showSettings)
+        case "copyAddress":
+            item.label = "Copy Address"
+            item.toolTip = "Copy the secure dashboard address"
+            item.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy dashboard address")
+            item.target = self
+            item.action = #selector(copyDashboardAddress)
+        case "reload":
+            item.label = "Reload"
+            item.toolTip = "Reload the dashboard"
+            item.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: "Reload dashboard")
+            item.target = self
+            item.action = #selector(reloadDashboard)
+        case "updates":
+            item.label = "Updates"
+            item.toolTip = "Check for Radio Command Center updates"
+            item.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: "Check for updates")
+            item.target = self
+            item.action = #selector(checkForUpdates)
+        default:
+            return nil
+        }
+        return item
+    }
+
+    @objc private func showMainWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func copyDashboardAddress() {
+        guard let value = dashboardURL?.absoluteString else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+        statusLabel.stringValue = "Dashboard address copied"
+    }
+
+    @objc private func openHealthCenter() {
+        guard let base = dashboardURL else { return }
+        var components = URLComponents(url: base, resolvingAgainstBaseURL: false)
+        components?.fragment = "health-center"
+        guard let healthURL = components?.url else { return }
+        webView.load(URLRequest(url: healthURL))
+        webView.evaluateJavaScript("document.getElementById('health-center-button')?.click()")
+    }
+
+    @objc private func showSettings() {
+        if let settingsWindow {
+            settingsWindow.makeKeyAndOrderFront(nil)
+            return
+        }
+        let panel = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 680, height: 430),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false
+        )
+        panel.title = "Radio Command Center Settings"
+        panel.isReleasedWhenClosed = false
+        let tabs = NSTabView(frame: NSRect(x: 16, y: 16, width: 648, height: 398))
+        for (name, text) in [
+            ("Source", "Choose and validate the local or mounted recording source."),
+            ("Models", "Medium and Large V3 readiness and download progress are available in Dashboard Controls."),
+            ("Network", "The dashboard address and certificate trust remain managed by the secure local service."),
+            ("Storage", "Backups, restore drills, storage reserve, and diagnostics are available to administrators."),
+            ("Users", "Create viewer, operator, supervisor, and administrator profiles in Dashboard Controls."),
+            ("Updates", "Updates are verified before installation and retain a rollback copy."),
+        ] {
+            let tab = NSTabViewItem(identifier: name)
+            tab.label = name
+            let view = NSView(frame: tabs.contentRect)
+            let description = label(text, size: 13)
+            description.frame = NSRect(x: 22, y: 250, width: 560, height: 60)
+            description.maximumNumberOfLines = 3
+            view.addSubview(description)
+            tab.view = view
+            tabs.addTabViewItem(tab)
+        }
+        panel.contentView?.addSubview(tabs)
+        panel.center()
+        settingsWindow = panel
+        panel.makeKeyAndOrderFront(nil)
     }
 
     private func runControl(_ arguments: [String], completion: @escaping ([String: Any]?) -> Void) {
@@ -628,6 +784,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                     )
                     : "○ Services stopped"
                 self.statusLabel.textColor = snapshot.running ? .systemGreen : .secondaryLabelColor
+                self.menuStatusItem?.button?.title = snapshot.running
+                    ? (snapshot.transcriptionRunning ? "Radio ●" : "Radio ◐")
+                    : "Radio ○"
+                self.menuStatusItem?.button?.toolTip = self.statusLabel.stringValue
                 self.sourceField.stringValue = snapshot.sourcePath
                 self.folderSavedButton?.isEnabled = !snapshot.sourcePath.isEmpty
                 self.dashboardURL = snapshot.dashboardURL
@@ -671,6 +831,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     @objc private func chooseSource() {
+        let chooser = NSOpenPanel()
+        chooser.title = "Choose Recording Source"
+        chooser.message = "Choose the local folder or mounted share that contains radio recordings."
+        chooser.prompt = "Use Recording Folder"
+        chooser.canChooseFiles = false
+        chooser.canChooseDirectories = true
+        chooser.allowsMultipleSelection = false
+        chooser.canCreateDirectories = false
+        if chooser.runModal() == .OK, let folder = chooser.url {
+            guard FileManager.default.isReadableFile(atPath: folder.path) else {
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "Recording folder is not readable"
+                alert.informativeText = "Reconnect the drive or choose a folder this Mac can read."
+                alert.runModal()
+                return
+            }
+            sourceField.stringValue = folder.path
+            statusLabel.stringValue = "Validating and saving recording folder…"
+            runControl(["configure", "--source", folder.path]) { [weak self] value in
+                self?.statusLabel.stringValue = value == nil
+                    ? "Recording folder could not be saved"
+                    : "Folder validated — restart to apply"
+            }
+        }
+        return
+
+#if false
         guard sourcePanel == nil else {
             sourcePanel?.makeKeyAndOrderFront(nil)
             return
@@ -773,6 +961,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         chooseSourceButton.isEnabled = false
         window.beginSheet(panel)
         loadFolder(FileManager.default.homeDirectoryForCurrentUser)
+#endif
     }
 
     private func loadFolder(_ url: URL) {
@@ -954,6 +1143,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     @objc private func restartServices() {
+        if transcriptionEnabled {
+            let alert = NSAlert()
+            alert.messageText = "Restart Radio Command Center?"
+            alert.informativeText = "Active transcription will pause briefly. Durable queued work resumes automatically."
+            alert.addButton(withTitle: "Restart")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
         statusLabel.stringValue = "Restarting services…"
         dashboardLoaded = false
         dashboardLoadInProgress = false
@@ -961,6 +1158,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     @objc private func stopServices() {
+        if transcriptionEnabled {
+            let alert = NSAlert()
+            alert.messageText = "Stop Radio Command Center?"
+            alert.informativeText = "Transcription and sync will stop. Queued jobs remain saved for the next launch."
+            alert.addButton(withTitle: "Stop")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
         statusLabel.stringValue = "Stopping services…"
         runControl(["stop"]) { [weak self] _ in self?.refreshStatus() }
     }

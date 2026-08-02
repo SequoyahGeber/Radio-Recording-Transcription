@@ -24,9 +24,19 @@ os.environ["RADIO_RECORDING_YEAR"] = "2026"
 
 from backend.alerts import rule_matches
 from backend.database import connect, initialize_database
+from backend.glossaries import get_glossary, normalize_terms, save_glossary
+from backend.jobs import (
+    claim_job,
+    complete_job,
+    due_jobs,
+    enqueue_job,
+    fail_or_reschedule_job,
+)
 from backend.transcript_quality import (
     assess_transcript,
     choose_retry_result,
+    explain_retry_selection,
+    explain_retry_trigger,
     should_retry_with_larger_model,
 )
 import sync
@@ -97,6 +107,45 @@ class TranscriptQualityTests(unittest.TestCase):
         self.assertFalse(used_retry)
         self.assertEqual(text, primary_text)
 
+    def test_retry_explanations_are_operator_readable(self):
+        primary = assess_transcript("hello hello hello hello hello hello", 12)
+        retry = assess_transcript("Medical team proceed to north gate", 8)
+        self.assertIn("because", explain_retry_trigger(primary))
+        self.assertIn("Large V3 selected", explain_retry_selection(primary, retry, True))
+
+
+class DurableJobTests(unittest.TestCase):
+    def test_job_claim_retry_and_completion_survive_outside_worker_memory(self):
+        path = f"Medical/durable-{datetime.now().timestamp()}.wav"
+        job = enqueue_job("primary", path, priority=0, max_attempts=2)
+        self.assertIn(job["id"], [item["id"] for item in due_jobs()])
+        claimed = claim_job(job["id"])
+        self.assertEqual(claimed["attempt_count"], 1)
+        waiting = fail_or_reschedule_job(job["id"], "temporary", delay_seconds=0)
+        self.assertEqual(waiting["status"], "retry_wait")
+        self.assertIsNotNone(claim_job(job["id"]))
+        exhausted = fail_or_reschedule_job(job["id"], "permanent", delay_seconds=0)
+        self.assertEqual(exhausted["status"], "failed")
+
+    def test_completed_job_is_not_requeued_by_duplicate_event(self):
+        path = f"Security/complete-{datetime.now().timestamp()}.wav"
+        job = enqueue_job("primary", path)
+        self.assertIsNotNone(claim_job(job["id"]))
+        complete_job(job["id"], 42)
+        duplicate = enqueue_job("primary", path)
+        self.assertEqual(duplicate["status"], "completed")
+
+
+class GlossaryTests(unittest.TestCase):
+    def test_terms_are_deduplicated_and_versioned_per_channel(self):
+        self.assertEqual(normalize_terms(["  Alpha One ", "alpha one", "Médic"]), ["Alpha One", "Médic"])
+        saved = save_glossary("Medical Test", ["Alpha One", "Médic"], "en", "tester")
+        updated = save_glossary(
+            "Medical Test", ["Alpha One", "North Gate"], "en", "tester", saved["version"]
+        )
+        self.assertEqual(updated["version"], saved["version"] + 1)
+        self.assertIn("North Gate", get_glossary("Medical Test")["terms"])
+
 
 class DatabaseMigrationTests(unittest.TestCase):
     def test_schema_contains_reliability_and_review_fields(self):
@@ -145,11 +194,54 @@ class DatabaseMigrationTests(unittest.TestCase):
                     """
                 )
             }
+            phase_five_tables = {
+                row["name"]
+                for row in connection.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                      AND name IN (
+                          'incidents', 'incident_transcripts',
+                          'incident_tasks', 'incident_notes'
+                      )
+                    """
+                )
+            }
+            phase_six_tables = {
+                row["name"]
+                for row in connection.execute(
+                    """
+                    SELECT name FROM sqlite_master
+                    WHERE type = 'table'
+                      AND name IN (
+                          'transcription_jobs', 'channel_glossaries',
+                          'model_downloads', 'backup_history'
+                      )
+                    """
+                )
+            }
+            phase_eight_tables = {
+                row["name"]
+                for row in connection.execute(
+                    """
+                    SELECT name FROM sqlite_master
+                    WHERE type = 'table'
+                      AND name IN (
+                          'transcript_segments',
+                          'channel_transcription_profiles'
+                      )
+                    """
+                )
+            }
             default_rules = connection.execute(
                 "SELECT count(*) FROM alert_rules WHERE is_default = 1"
             ).fetchone()[0]
         self.assertIsNotNone(fts_table)
         self.assertEqual(len(phase_four_tables), 6)
+        self.assertEqual(len(phase_five_tables), 4)
+        self.assertEqual(len(phase_six_tables), 4)
+        self.assertEqual(len(phase_eight_tables), 2)
         self.assertGreaterEqual(default_rules, 5)
 
 

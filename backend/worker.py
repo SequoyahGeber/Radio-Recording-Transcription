@@ -5,7 +5,7 @@ import json
 import platform
 import av
 import numpy as np
-from threading import Thread, Timer, Lock
+from threading import Thread, Lock
 from datetime import datetime
 from itertools import count
 from queue import PriorityQueue
@@ -25,10 +25,24 @@ from backend.model_manager import (
     PRIMARY_MLX_MODEL,
     RETRY_MLX_MODEL as LARGE_V3_MLX_MODEL,
 )
+from backend.glossaries import prompt_for_channel
+from backend.analytics import profile_for_channel
+from backend.jobs import (
+    claim_job,
+    complete_job,
+    defer_job,
+    due_jobs,
+    enqueue_job,
+    fail_or_reschedule_job,
+    has_live_primary_work,
+    queue_summary,
+)
 from backend.security import load_security_config
 from backend.transcript_quality import (
     assess_transcript,
     choose_retry_result,
+    explain_retry_selection,
+    explain_retry_trigger,
     should_retry_with_larger_model,
 )
 
@@ -150,10 +164,29 @@ def voice_activity_segments(audio):
     ]
 
 
-def transcribe_audio(filepath, model_repo=None):
+def prepare_audio(audio, normalize=False, denoise=False):
+    prepared = audio.copy()
+    if denoise and prepared.size:
+        floor = float(np.percentile(np.abs(prepared), 20))
+        prepared[np.abs(prepared) < floor * 1.5] = 0
+    if normalize and prepared.size:
+        peak = float(np.max(np.abs(prepared)))
+        if peak > 0.01:
+            prepared = prepared * min(4.0, 0.95 / peak)
+    return prepared
+
+
+def transcribe_audio(
+    filepath,
+    model_repo=None,
+    initial_prompt=None,
+    language="en",
+    normalize=False,
+    denoise=False,
+):
     requested_model = model_repo or MLX_MODEL
     if active_engine == "mlx":
-        audio = decode_audio(filepath)
+        audio = prepare_audio(decode_audio(filepath), normalize, denoise)
         duration = len(audio) / 16000
         speech_segments = voice_activity_segments(audio)
         if not speech_segments:
@@ -162,7 +195,8 @@ def transcribe_audio(filepath, model_repo=None):
             mlx_whisper.transcribe(
                 speech_audio,
                 path_or_hf_repo=requested_model,
-                language="en",
+                language=language,
+                initial_prompt=initial_prompt,
                 condition_on_previous_text=False,
                 temperature=(0.0, 0.2, 0.4),
                 compression_ratio_threshold=2.2,
@@ -202,6 +236,20 @@ def transcribe_audio(filepath, model_repo=None):
         if no_speech_values:
             metrics["no_speech_prob"] = max(no_speech_values)
         metrics["model"] = requested_model
+        metrics["_segments"] = [
+            {
+                "start": float(segment.get("start") or 0),
+                "end": float(segment.get("end") or 0),
+                "text": (segment.get("text") or "").strip(),
+                "confidence": (
+                    round(float(np.exp(segment["avg_logprob"])), 4)
+                    if segment.get("avg_logprob") is not None
+                    else None
+                ),
+            }
+            for segment in decoded_segments
+            if (segment.get("text") or "").strip()
+        ]
         transcript = " ".join(
             (result.get("text") or "").strip()
             for result in results
@@ -209,12 +257,18 @@ def transcribe_audio(filepath, model_repo=None):
         )
         return transcript, duration, metrics
 
+    audio_input = (
+        prepare_audio(decode_audio(filepath), normalize, denoise)
+        if normalize or denoise
+        else filepath
+    )
     segments, info = model.transcribe(
-        filepath,
+        audio_input,
         beam_size=5,
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 250},
-        language="en",
+        language=language,
+        initial_prompt=initial_prompt,
         condition_on_previous_text=False,
     )
     segments = list(segments)
@@ -240,6 +294,20 @@ def transcribe_audio(filepath, model_repo=None):
         metrics["avg_logprob"] = min(logprob_values)
     if no_speech_values:
         metrics["no_speech_prob"] = max(no_speech_values)
+    metrics["_segments"] = [
+        {
+            "start": float(segment.start),
+            "end": float(segment.end),
+            "text": segment.text.strip(),
+            "confidence": (
+                round(float(np.exp(segment.avg_logprob)), 4)
+                if getattr(segment, "avg_logprob", None) is not None
+                else None
+            ),
+        }
+        for segment in segments
+        if segment.text.strip()
+    ]
     return (
         " ".join(segment.text.strip() for segment in segments).strip(),
         info.duration,
@@ -274,15 +342,27 @@ def enqueue_file(
     task_type="primary",
 ):
     queue_key = (task_type, rel_path)
-    if retry_count == 0:
-        with queue_lock:
-            if queue_key in queued_files:
-                return False
-            queued_files.add(queue_key)
     if task_type == "quality_retry":
         tier, recorded_timestamp = (2, recorded_at_for_file(rel_path).timestamp())
+        retry_limit = MAX_RESCUE_RETRIES + 1
+        requested_model = RETRY_MLX_MODEL
     else:
         tier, recorded_timestamp = priority_key or priority_for_file(rel_path)
+        retry_limit = MAX_RETRIES + 1
+        requested_model = MLX_MODEL
+    job = enqueue_job(
+        task_type,
+        rel_path,
+        priority=tier,
+        max_attempts=retry_limit,
+        model=requested_model,
+    )
+    if job["status"] not in {"queued", "retry_wait"}:
+        return False
+    with queue_lock:
+        if queue_key in queued_files:
+            return False
+        queued_files.add(queue_key)
     transcription_queue.put(
         (
             tier,
@@ -291,10 +371,32 @@ def enqueue_file(
             task_type,
             filepath,
             rel_path,
-            retry_count,
+            job["attempt_count"],
+            job["id"],
         )
     )
     return True
+
+
+def dispatch_due_jobs():
+    for job in due_jobs():
+        queue_key = (job["job_type"], job["relative_path"])
+        with queue_lock:
+            if queue_key in queued_files:
+                continue
+            queued_files.add(queue_key)
+        transcription_queue.put(
+            (
+                job["priority"],
+                recorded_at_for_file(job["relative_path"]).timestamp(),
+                next(queue_sequence),
+                job["job_type"],
+                os.path.join(FOLDER_TO_WATCH, job["relative_path"]),
+                job["relative_path"],
+                job["attempt_count"],
+                job["id"],
+            )
+        )
 
 def queue_existing_unprocessed_files():
     print("[STARTUP] Checking for existing unprocessed audio files in all subfolders...")
@@ -371,49 +473,73 @@ def queue_existing_quality_retries():
         )
 
 
+def save_transcript_segments(transcript_id, result_kind, segments):
+    with connect() as connection:
+        connection.execute(
+            "DELETE FROM transcript_segments WHERE transcript_id = ? AND result_kind = ?",
+            (int(transcript_id), result_kind),
+        )
+        connection.executemany(
+            """
+            INSERT INTO transcript_segments(
+                transcript_id, result_kind, segment_index,
+                start_seconds, end_seconds, text, confidence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    int(transcript_id),
+                    result_kind,
+                    index,
+                    max(0, float(segment.get("start") or 0)),
+                    max(0, float(segment.get("end") or 0)),
+                    str(segment.get("text") or "").strip(),
+                    segment.get("confidence"),
+                )
+                for index, segment in enumerate(segments)
+                if str(segment.get("text") or "").strip()
+            ],
+        )
+        connection.commit()
+
+
 def process_task(item):
     global consecutive_errors
-    tier, recorded_timestamp, _, task_type, filepath, rel_path, retry_count = item
+    tier, recorded_timestamp, _, task_type, filepath, rel_path, retry_count, job_id = item
     queue_key = (task_type, rel_path)
-    priority_key = (tier, recorded_timestamp)
-    retry_scheduled = False
-    
+    claimed = claim_job(job_id)
+    if claimed is None:
+        with queue_lock:
+            queued_files.discard(queue_key)
+        transcription_queue.task_done()
+        return
+
     try:
         if not os.path.exists(filepath):
+            fail_or_reschedule_job(job_id, "Audio file is not available", RETRY_DELAY)
             return
             
         try:
             file_size = os.path.getsize(filepath)
         except FileNotFoundError:
+            fail_or_reschedule_job(job_id, "Audio file disappeared while queued", RETRY_DELAY)
             return 
         
         if file_size == 0:
-            retry_limit = (
-                MAX_RESCUE_RETRIES
-                if task_type == "quality_retry"
-                else MAX_RETRIES
-            )
-            if retry_count < retry_limit:
-                retry_scheduled = True
-                retry_timer = Timer(
-                    RETRY_DELAY,
-                    enqueue_file,
-                    args=(filepath, rel_path),
-                    kwargs={
-                        "retry_count": retry_count + 1,
-                        "priority_key": priority_key,
-                        "task_type": task_type,
-                    },
-                )
-                retry_timer.daemon = True
-                retry_timer.start()
+            fail_or_reschedule_job(job_id, "Audio file is still empty", RETRY_DELAY)
             return
 
         if task_type == "quality_retry":
+            if has_live_primary_work(excluding_job_id=job_id):
+                defer_job(job_id, 5)
+                return
             with connect(read_only=True) as connection:
                 existing = connection.execute(
                     """
-                    SELECT transcript_text, quality_score, quality_reason,
+                    SELECT id, raw_transcript_text, transcript_text,
+                           primary_quality_score, primary_quality_reason,
+                           primary_quality_metrics, primary_status,
+                           quality_score, quality_reason,
                            quality_metrics, status, retry_model
                     FROM transcripts
                     WHERE filename = ?
@@ -421,6 +547,7 @@ def process_task(item):
                     (rel_path,),
                 ).fetchone()
             if existing is None or existing["retry_model"]:
+                complete_job(job_id, existing["id"] if existing else None)
                 return
             queue_name = "LARGE-V3-RESCUE"
             requested_model = RETRY_MLX_MODEL
@@ -428,13 +555,30 @@ def process_task(item):
             existing = None
             queue_name = "LIVE" if tier == 0 else "BACKLOG"
             requested_model = MLX_MODEL
+        channel = infer_channel(rel_path)
+        glossary_prompt, glossary_language = prompt_for_channel(channel)
+        channel_profile = profile_for_channel(channel)
+        detected_language = (
+            None
+            if channel_profile.get("experimental_enabled")
+            and channel_profile.get("language_mode") == "detect"
+            else glossary_language
+        )
         print(f"[QUEUE:{queue_name}] Starting transcription for: {rel_path}")
         start_time = time.time()
         
         full_transcript, audio_duration, engine_metrics = transcribe_audio(
             filepath,
             requested_model,
+            glossary_prompt,
+            detected_language,
+            bool(channel_profile.get("normalize_audio")),
+            bool(
+                channel_profile.get("experimental_enabled")
+                and channel_profile.get("denoise_audio")
+            ),
         )
+        decoded_segments = engine_metrics.pop("_segments", [])
         quality = assess_transcript(full_transcript, audio_duration, engine_metrics)
         
         end_time = time.time()
@@ -442,20 +586,31 @@ def process_task(item):
 
         if task_type == "quality_retry":
             try:
-                primary_metrics = json.loads(existing["quality_metrics"] or "{}")
+                primary_metrics = json.loads(
+                    existing["primary_quality_metrics"]
+                    or existing["quality_metrics"]
+                    or "{}"
+                )
             except (TypeError, ValueError, json.JSONDecodeError):
                 primary_metrics = {}
             primary_quality = {
-                "score": existing["quality_score"],
-                "reason": existing["quality_reason"] or "",
+                "score": existing["primary_quality_score"]
+                if existing["primary_quality_score"] is not None
+                else existing["quality_score"],
+                "reason": existing["primary_quality_reason"]
+                or existing["quality_reason"]
+                or "",
                 "metrics": primary_metrics,
-                "status": existing["status"],
+                "status": existing["primary_status"] or "ready",
             }
             selected_text, selected_quality, used_retry = choose_retry_result(
-                existing["transcript_text"] or "",
+                existing["raw_transcript_text"] or existing["transcript_text"] or "",
                 primary_quality,
                 full_transcript,
                 quality,
+            )
+            selection_reason = explain_retry_selection(
+                primary_quality, quality, used_retry
             )
             with connect() as connection:
                 connection.execute(
@@ -468,6 +623,8 @@ def process_task(item):
                         retry_quality_metrics = ?,
                         retry_status = ?,
                         retry_attempted_at = ?,
+                        selection_reason = ?,
+                        selected_transcript = ?,
                         transcript_text = ?,
                         quality_score = ?,
                         quality_reason = ?,
@@ -493,6 +650,8 @@ def process_task(item):
                         ),
                         "selected" if used_retry else "kept_primary",
                         current_time,
+                        selection_reason,
+                        "retry" if used_retry else "primary",
                         selected_text,
                         selected_quality["score"],
                         selected_quality["reason"],
@@ -509,6 +668,8 @@ def process_task(item):
                     ),
                 )
                 connection.commit()
+            complete_job(job_id, existing["id"])
+            save_transcript_segments(existing["id"], "retry", decoded_segments)
             inserted = False
             result = (
                 "Large V3 rescue selected"
@@ -525,8 +686,11 @@ def process_task(item):
                         filename, transcript_text,
                         raw_transcript_text, quality_score, quality_reason,
                         quality_metrics, status, broadcast_pending,
-                        transcription_model
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        transcription_model, primary_quality_score,
+                        primary_quality_reason, primary_quality_metrics,
+                        primary_status, primary_model, selected_transcript,
+                        selection_reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         current_time,
@@ -546,10 +710,27 @@ def process_task(item):
                         quality["status"],
                         int(quality["status"] == "ready"),
                         MLX_MODEL if active_engine == "mlx" else MODEL_SIZE,
+                        quality["score"],
+                        quality["reason"],
+                        json.dumps(
+                            quality["metrics"],
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                        quality["status"],
+                        MLX_MODEL if active_engine == "mlx" else MODEL_SIZE,
+                        "primary",
+                        "Medium result selected by default",
                     ),
                 )
                 inserted = cursor.rowcount == 1
+                transcript_row = connection.execute(
+                    "SELECT id FROM transcripts WHERE filename = ?", (rel_path,)
+                ).fetchone()
                 connection.commit()
+            complete_job(job_id, transcript_row["id"] if transcript_row else None)
+            if transcript_row:
+                save_transcript_segments(transcript_row["id"], "primary", decoded_segments)
 
             if inserted and quality["status"] == "blank":
                 result = "Saved as processed; blank audio hidden from dashboard"
@@ -568,6 +749,13 @@ def process_task(item):
                     RETRY_MAX_DURATION,
                 )
             ):
+                retry_trigger = explain_retry_trigger(quality)
+                with connect() as connection:
+                    connection.execute(
+                        "UPDATE transcripts SET retry_trigger_reason = ? WHERE filename = ?",
+                        (retry_trigger, rel_path),
+                    )
+                    connection.commit()
                 enqueue_file(
                     filepath,
                     rel_path,
@@ -590,6 +778,7 @@ def process_task(item):
                 "model": requested_model,
                 "task_type": task_type,
                 "queue_depth": transcription_queue.qsize(),
+                "durable_queue": queue_summary(),
                 "last_file": rel_path,
                 "last_quality_status": quality["status"],
             },
@@ -615,21 +804,8 @@ def process_task(item):
             if task_type == "quality_retry"
             else MAX_RETRIES
         )
-        if retry_count < retry_limit:
-            retry_scheduled = True
-            retry_timer = Timer(
-                RETRY_DELAY,
-                enqueue_file,
-                args=(filepath, rel_path),
-                kwargs={
-                    "retry_count": retry_count + 1,
-                    "priority_key": priority_key,
-                    "task_type": task_type,
-                },
-            )
-            retry_timer.daemon = True
-            retry_timer.start()
-        elif task_type == "quality_retry":
+        job = fail_or_reschedule_job(job_id, e, RETRY_DELAY)
+        if task_type == "quality_retry" and job and job["status"] == "failed":
             with connect() as connection:
                 connection.execute(
                     """
@@ -643,9 +819,8 @@ def process_task(item):
                 )
                 connection.commit()
     finally:
-        if not retry_scheduled:
-            with queue_lock:
-                queued_files.discard(queue_key)
+        with queue_lock:
+            queued_files.discard(queue_key)
         transcription_queue.task_done()
 
 def transcription_worker():
@@ -714,6 +889,15 @@ def deliver_pending_transcripts():
 def heartbeat_worker():
     while True:
         try:
+            durable = queue_summary()
+            primary_depth = sum(
+                durable.get("primary", {}).get(state, 0)
+                for state in ("queued", "running", "retry_wait")
+            )
+            rescue_depth = sum(
+                durable.get("quality_retry", {}).get(state, 0)
+                for state in ("queued", "running", "retry_wait")
+            )
             update_heartbeat(
                 "worker",
                 "online",
@@ -721,7 +905,9 @@ def heartbeat_worker():
                     "engine": active_engine,
                     "model": MLX_MODEL if active_engine == "mlx" else MODEL_SIZE,
                     "retry_model": RETRY_MLX_MODEL if active_engine == "mlx" else None,
-                    "queue_depth": transcription_queue.qsize(),
+                    "queue_depth": primary_depth,
+                    "rescue_queue_depth": rescue_depth,
+                    "durable_queue": durable,
                 },
             )
         except Exception as exc:
@@ -750,6 +936,15 @@ def periodic_reconciliation():
         queue_existing_unprocessed_files()
         queue_existing_quality_retries()
 
+
+def durable_job_dispatcher():
+    while True:
+        try:
+            dispatch_due_jobs()
+        except Exception as exc:
+            print(f"[QUEUE] Durable job dispatcher failed: {exc}")
+        time.sleep(1)
+
 queue_existing_unprocessed_files()
 queue_existing_quality_retries()
 
@@ -761,6 +956,9 @@ for _ in range(MAX_WORKERS):
 
 reconciliation_thread = Thread(target=periodic_reconciliation, daemon=True)
 reconciliation_thread.start()
+
+job_dispatch_thread = Thread(target=durable_job_dispatcher, daemon=True)
+job_dispatch_thread.start()
 
 delivery_thread = Thread(target=deliver_pending_transcripts, daemon=True)
 delivery_thread.start()

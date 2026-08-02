@@ -4,19 +4,50 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Welcome | Radio Command Center</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260727-3" />
+    <link rel="stylesheet" href="/static/css/style.css?v=20260801-2" />
   </head>
   <body class="login-body">
     <main class="login-shell">
-      <section class="login-card setup-card" aria-labelledby="setup-title">
+      <section class="login-card setup-card setup-wizard-card" aria-labelledby="setup-title">
         <div class="login-mark"><span class="live-pulse"></span></div>
         <p class="login-eyebrow">First-time setup</p>
         <h1 id="setup-title">Welcome to Radio Command Center</h1>
-        <p class="login-copy">
-          Create the administrator account for this Mac. You can add dashboard-only
-          profiles after signing in.
-        </p>
-        <form id="setup-form">
+        <p id="setup-step-label" class="login-copy">Step 1 of 5 · Welcome</p>
+        <div class="setup-progress" aria-hidden="true"><span id="setup-progress-bar"></span></div>
+
+        <section class="setup-step" data-step="1">
+          <h2>Your private radio operations workspace</h2>
+          <p>Recordings and transcripts stay in this Mac’s Application Support folder. Setup will verify the source, storage, Medium model, administrator, and recovery backup.</p>
+          <button id="setup-welcome-next" class="btn btn-primary login-submit" type="button">Begin readiness check</button>
+        </section>
+
+        <section class="setup-step" data-step="2" hidden>
+          <h2>Recording source and storage</h2>
+          <label for="setup-source-dir">Recording folder</label>
+          <input id="setup-source-dir" placeholder="/Volumes/Active Recording" required />
+          <label for="setup-minimum-free">Keep at least this much space free</label>
+          <select id="setup-minimum-free">
+            <option value="10">10 GB</option>
+            <option value="25">25 GB</option>
+            <option value="50">50 GB</option>
+            <option value="100">100 GB</option>
+          </select>
+          <label class="checkbox-label"><span><input id="setup-transcription-enabled" type="checkbox" checked /> Enable transcription after setup</span></label>
+          <div id="setup-source-result" class="setup-check-result" role="status"></div>
+          <button id="setup-source-next" class="btn btn-primary login-submit" type="button">Validate and continue</button>
+        </section>
+
+        <section class="setup-step" data-step="3" hidden>
+          <h2>Medium transcription model</h2>
+          <p id="setup-model-status">Checking the installed model…</p>
+          <progress id="setup-model-progress" max="1" hidden></progress>
+          <button id="setup-model-download" class="btn btn-primary login-submit" type="button">Download Medium model</button>
+          <button id="setup-model-next" class="btn login-submit" type="button" disabled>Continue</button>
+          <p class="setup-hint">A failed download never locks you out; partial files resume when you retry.</p>
+        </section>
+
+        <form id="setup-form" class="setup-step" data-step="4" hidden>
+          <h2>Create the administrator</h2>
           <label for="setup-display-name">Administrator name</label>
           <input
             id="setup-display-name"
@@ -61,15 +92,23 @@
           />
 
           <button class="btn btn-primary login-submit" type="submit">
-            Create administrator
+            Create administrator and continue
           </button>
           <p id="setup-error" class="login-error" role="alert" hidden></p>
         </form>
+
+        <section class="setup-step" data-step="5" hidden>
+          <h2>Recovery and final readiness</h2>
+          <div id="setup-final-checks" class="setup-final-checks"></div>
+          <button id="setup-backup-button" class="btn login-submit" type="button">Create and verify first backup</button>
+          <button id="setup-notification-button" class="btn login-submit" type="button">Test notification permission</button>
+          <button id="setup-finish-button" class="btn btn-primary login-submit" type="button">Open Radio Command Center</button>
+        </section>
         <div class="login-security-note">
           Stored securely on this Mac · No default password
         </div>
       </section>
     </main>
-    <script src="/static/js/setup.js?v=20260727-3"></script>
+    <script src="/static/js/setup.js?v=20260801-2"></script>
   </body>
 </html>

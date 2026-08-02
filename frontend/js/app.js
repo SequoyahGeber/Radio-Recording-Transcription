@@ -103,16 +103,13 @@ const knownChannels = new Set();
 const processedMessages = new Set();
 const autoScrollState = {};
 const unreadCounts = {};
+const feedHistoryState = new Map();
 let globalSearchQuery = "";
 let dateTimeFilterActive = false;
 let currentProfile = null;
 let archiveSearchTimer = null;
 let archiveRequestNumber = 0;
 let lastSeenTranscriptId = 0;
-let oldestLoadedTranscriptId = null;
-let oldestLoadedRecordedAt = Number.POSITIVE_INFINITY;
-let loadingOlderTranscripts = false;
-let restoringArchiveScroll = false;
 let hasMoreHistory = true;
 let showSuspectTranscripts = false;
 let bookmarksOnly = false;
@@ -133,6 +130,45 @@ const hiddenChannels = new Set(
 const storedColumnOrder = readStoredJSON("radioColumnOrder", []);
 let savedColumnOrder = Array.isArray(storedColumnOrder) ? storedColumnOrder : [];
 
+function historyStateFor(colId) {
+  if (!feedHistoryState.has(colId)) {
+    feedHistoryState.set(colId, {
+      hasMore: true,
+      loading: false,
+      oldestId: null,
+      oldestRecordedAt: Number.POSITIVE_INFINITY,
+      lastScrollTop: 0,
+      suppressUntil: 0,
+    });
+  }
+  return feedHistoryState.get(colId);
+}
+
+function refreshHistoryAvailability() {
+  hasMoreHistory = [...feedHistoryState.values()].some(
+    (state) => state.hasMore,
+  );
+}
+
+function applyControlTooltips(root = document) {
+  root.querySelectorAll("button[aria-label], summary[aria-label]").forEach((control) => {
+    if (!control.title) control.title = control.getAttribute("aria-label");
+  });
+}
+
+applyControlTooltips();
+new MutationObserver((mutations) => {
+  mutations.forEach((mutation) => {
+    mutation.addedNodes.forEach((node) => {
+      if (!(node instanceof Element)) return;
+      if (node.matches("button[aria-label], summary[aria-label]") && !node.title) {
+        node.title = node.getAttribute("aria-label");
+      }
+      applyControlTooltips(node);
+    });
+  });
+}).observe(document.body, { childList: true, subtree: true });
+
 // --- Integrated event console ---
 const consolePanel = document.getElementById("console-panel");
 const consoleToggleButton = document.getElementById("console-toggle-button");
@@ -140,6 +176,7 @@ const consoleOutput = document.getElementById("console-output");
 const consoleStatus = document.getElementById("console-status");
 const consoleServiceFilter = document.getElementById("console-service");
 const consoleLevelFilter = document.getElementById("console-level");
+const consoleSearchInput = document.getElementById("console-search");
 const consolePauseButton = document.getElementById("console-pause-button");
 const consoleErrorCount = document.getElementById("console-error-count");
 const consoleState = {
@@ -405,10 +442,12 @@ function consoleEntryTimestamp(value) {
 function renderConsoleEntries() {
   const service = consoleServiceFilter.value;
   const level = consoleLevelFilter.value;
+  const query = consoleSearchInput.value.trim().toLowerCase();
   const entries = [...consoleState.serverEntries, ...consoleState.browserEntries]
     .filter((entry) => !consoleState.hiddenEntryIds.has(entry.id))
     .filter((entry) => service === "all" || entry.source === service)
     .filter((entry) => level === "all" || entry.level === level)
+    .filter((entry) => !query || entry.message.toLowerCase().includes(query))
     .sort((left, right) =>
       String(left.timestamp || "").localeCompare(String(right.timestamp || "")),
     )
@@ -678,6 +717,7 @@ function extractTimeFromFilename(filename, fallbackTimestamp) {
 // --- Column Builder ---
 function createColumn(channelName, announce = true) {
   const colId = getColumnId(channelName);
+  historyStateFor(colId);
   unreadCounts[colId] = 0;
   const isVisible = !hiddenChannels.has(channelName);
   const safeChannelName = escapeHTML(channelName);
@@ -705,10 +745,10 @@ function createColumn(channelName, announce = true) {
           <div class="col-title-row">
 	              <div class="col-title"><span class="col-name">${safeChannelName}</span> <span class="channel-count" id="count-${colId}">0</span></div>
 	              <div class="col-actions">
-	                  <button class="arrow-btn focus-feed-button" data-action="focus-column" data-column-id="${colId}" title="Focus feed" aria-label="Focus ${safeChannelName} feed">⌾</button>
-	                  <button class="arrow-btn" data-action="move-column" data-column-id="${colId}" data-direction="left" title="Move left" aria-label="Move ${safeChannelName} left">◀</button>
-                  <button class="arrow-btn" data-action="move-column" data-column-id="${colId}" data-direction="right" title="Move right" aria-label="Move ${safeChannelName} right">▶</button>
-                  <button class="scroll-toggle active" data-action="toggle-auto-scroll" data-column-id="${colId}" aria-pressed="true">Following live</button>
+	                  <button class="arrow-btn focus-feed-button" data-action="focus-column" data-column-id="${colId}" title="Focus ${safeChannelName} feed" aria-label="Focus ${safeChannelName} feed">⌾</button>
+	                  <button class="arrow-btn" data-action="move-column" data-column-id="${colId}" data-direction="left" title="Move ${safeChannelName} left" aria-label="Move ${safeChannelName} left">◀</button>
+                  <button class="arrow-btn" data-action="move-column" data-column-id="${colId}" data-direction="right" title="Move ${safeChannelName} right" aria-label="Move ${safeChannelName} right">▶</button>
+                  <button class="scroll-toggle active" data-action="toggle-auto-scroll" data-column-id="${colId}" aria-pressed="true" title="Pause automatic scrolling for ${safeChannelName}">Following live</button>
               </div>
           </div>
       </div>
@@ -824,6 +864,21 @@ function formatTime(seconds) {
   return `${m}:${s}`;
 }
 
+function updateFeedHistoryCursor(colId, data) {
+  const transcriptId = Number(data.id);
+  const recordedAt = new Date(data.recorded_at || data.timestamp || 0).getTime();
+  if (!transcriptId || !Number.isFinite(recordedAt)) return;
+  const state = historyStateFor(colId);
+  if (
+    recordedAt < state.oldestRecordedAt ||
+    (recordedAt === state.oldestRecordedAt &&
+      (state.oldestId === null || transcriptId < state.oldestId))
+  ) {
+    state.oldestRecordedAt = recordedAt;
+    state.oldestId = transcriptId;
+  }
+}
+
 function createMessageCard(data) {
   const card = document.createElement("div");
   card.className = "message-card";
@@ -845,21 +900,10 @@ function createMessageCard(data) {
     const transcriptId = Number(data.id) || 0;
     lastSeenTranscriptId = Math.max(lastSeenTranscriptId, transcriptId);
   }
-  const cursorTime = new Date(data.recorded_at || data.timestamp || 0);
   const realTime = extractTimeFromFilename(
     data.filename,
     data.recorded_at || data.timestamp,
   );
-  if (
-    data.id &&
-    Number.isFinite(cursorTime.getTime()) &&
-    (cursorTime.getTime() < oldestLoadedRecordedAt ||
-      (cursorTime.getTime() === oldestLoadedRecordedAt &&
-        Number(data.id) < Number(oldestLoadedTranscriptId)))
-  ) {
-    oldestLoadedRecordedAt = cursorTime.getTime();
-    oldestLoadedTranscriptId = Number(data.id);
-  }
   const hours = realTime.getHours().toString().padStart(2, "0");
   const mins = realTime.getMinutes().toString().padStart(2, "0");
   card.setAttribute("data-time", `${hours}:${mins}`);
@@ -1028,6 +1072,10 @@ function setFollowButtonState(colId, button = null) {
   const newCount = Number(unreadCounts[colId] || 0);
   control.classList.toggle("active", following);
   control.setAttribute("aria-pressed", String(following));
+  const channelName = document.getElementById(colId)?.dataset.channel || "this feed";
+  control.title = following
+    ? `Pause automatic scrolling for ${channelName}`
+    : `Resume automatic scrolling for ${channelName}`;
   control.innerText = following
     ? "Following live"
     : `Paused${newCount ? ` · ${newCount} new` : ""}`;
@@ -1161,8 +1209,7 @@ function clearRenderedTranscripts() {
   });
   dashboard.replaceChildren();
   togglesContainer.replaceChildren();
-  oldestLoadedTranscriptId = null;
-  oldestLoadedRecordedAt = Number.POSITIVE_INFINITY;
+  feedHistoryState.clear();
   knownChannels.clear();
   processedMessages.clear();
   Object.keys(unreadCounts).forEach((key) => delete unreadCounts[key]);
@@ -1173,6 +1220,16 @@ function clearRenderedTranscripts() {
 
 function nextAnimationFrame() {
   return new Promise((resolve) => requestAnimationFrame(resolve));
+}
+
+function refreshFeedCursor(container) {
+  const colId = container.id.replace(/^msgs-/, "");
+  const state = historyStateFor(colId);
+  const firstCard = container.querySelector(".message-card[data-transcript-id]");
+  state.oldestId = firstCard ? Number(firstCard.dataset.transcriptId) : null;
+  state.oldestRecordedAt = firstCard
+    ? Number(firstCard.dataset.recordedAt)
+    : Number.POSITIVE_INFINITY;
 }
 
 function pruneOldestRenderedTranscripts() {
@@ -1199,21 +1256,10 @@ function pruneOldestRenderedTranscripts() {
       card.remove();
     });
 
-  const oldestRemainingCard = [
-    ...dashboard.querySelectorAll("[data-transcript-id]"),
-  ].sort(
-    (left, right) =>
-      Number(left.dataset.recordedAt || 0) -
-        Number(right.dataset.recordedAt || 0) ||
-      Number(left.dataset.transcriptId || 0) -
-        Number(right.dataset.transcriptId || 0),
-  )[0];
-  oldestLoadedTranscriptId = oldestRemainingCard
-    ? Number(oldestRemainingCard.dataset.transcriptId)
-    : null;
-  oldestLoadedRecordedAt = oldestRemainingCard
-    ? Number(oldestRemainingCard.dataset.recordedAt)
-    : Number.POSITIVE_INFINITY;
+  document.querySelectorAll(".messages-container").forEach((container) => {
+    refreshFeedCursor(container);
+    historyStateFor(container.id.replace(/^msgs-/, "")).hasMore = true;
+  });
   hasMoreHistory = true;
 }
 
@@ -1232,6 +1278,7 @@ function archiveQueryParameters(options = {}) {
   if (bookmarksOnly) parameters.set("bookmarked", "true");
   if (options.afterId) parameters.set("after_id", String(options.afterId));
   if (options.beforeId) parameters.set("before_id", String(options.beforeId));
+  if (options.channel) parameters.set("channel", options.channel);
   parameters.set(
     "limit",
     options.afterId
@@ -1301,36 +1348,22 @@ async function loadArchive(options = {}) {
   } finally {
     renderBatchDepth -= 1;
   }
-  if (options.beforeId || !incremental) {
-    hasMoreHistory = hasOlderPage;
+  if (options.channel) {
+    historyStateFor(getColumnId(options.channel)).hasMore = hasOlderPage;
+    refreshHistoryAvailability();
+  } else if (!incremental) {
+    feedHistoryState.forEach((state) => {
+      state.hasMore = hasOlderPage;
+    });
+    refreshHistoryAvailability();
   }
   updateSearchResults();
-  if (options.beforeId && options.scrollPositions) {
-    requestAnimationFrame(() => {
-      restoringArchiveScroll = true;
-      document.querySelectorAll(".messages-container").forEach((container) => {
-        const position = options.scrollPositions.get(container.id);
-        if (position) {
-          container.scrollTop =
-            position.scrollTop + (container.scrollHeight - position.scrollHeight);
-        } else {
-          const columnId = container.id.replace(/^msgs-/, "");
-          if (autoScrollState[columnId]) {
-            container.scrollTop = container.scrollHeight;
-          }
-        }
-      });
-      requestAnimationFrame(() => {
-        restoringArchiveScroll = false;
-        document.querySelectorAll(".messages-container").forEach((container) => {
-          const columnId = container.id.replace(/^msgs-/, "");
-          if (autoScrollState[columnId]) {
-            container.scrollTop = container.scrollHeight;
-          }
-        });
-      });
-    });
-  } else {
+  if (options.beforeId && options.triggerContainer && options.scrollAnchor) {
+    await nextAnimationFrame();
+    restoreFeedScrollAnchor(options.triggerContainer, options.scrollAnchor);
+    await nextAnimationFrame();
+    options.triggerContainer.classList.remove("history-restoring");
+  } else if (!options.beforeId) {
     requestAnimationFrame(scrollAllAutoColumnsToLatest);
   }
   recordConsoleEvent(
@@ -1340,46 +1373,73 @@ async function loadArchive(options = {}) {
       : options.beforeId
         ? "Older archive page loaded"
         : "Recent archive loaded",
-    `${rows.length} transmission${rows.length === 1 ? "" : "s"}`,
+    `${rows.length} transmission${rows.length === 1 ? "" : "s"}${options.channel ? ` · ${options.channel}` : ""}`,
   );
   return rows.length;
 }
 
-async function loadOlderArchive(triggerContainer = null) {
-  if (
-    loadingOlderTranscripts ||
-    !hasMoreHistory ||
-    oldestLoadedTranscriptId === null
-  ) {
-    return;
-  }
-  loadingOlderTranscripts = true;
-  const scrollPositions = new Map(
-    [...document.querySelectorAll(".messages-container")]
-      .filter((container) => {
-        const columnId = container.id.replace(/^msgs-/, "");
-        return container === triggerContainer || !autoScrollState[columnId];
-      })
-      .map((container) => [
-        container.id,
-        {
-          scrollHeight: container.scrollHeight,
-          scrollTop: container.scrollTop,
-        },
-      ]),
+function captureFeedScrollAnchor(container) {
+  const containerTop = container.getBoundingClientRect().top;
+  const cards = [...container.querySelectorAll(".message-card[data-transcript-id]")];
+  const anchor = cards.find(
+    (card) => card.getBoundingClientRect().bottom > containerTop + 1,
   );
+  return {
+    transcriptId: anchor?.dataset.transcriptId || "",
+    offset: anchor ? anchor.getBoundingClientRect().top - containerTop : 0,
+    scrollHeight: container.scrollHeight,
+    scrollTop: container.scrollTop,
+  };
+}
+
+function restoreFeedScrollAnchor(container, anchor) {
+  container.classList.add("history-restoring");
+  const escapedId = CSS.escape(anchor.transcriptId);
+  const anchoredCard = escapedId
+    ? container.querySelector(`[data-transcript-id="${escapedId}"]`)
+    : null;
+  if (anchoredCard) {
+    const currentOffset =
+      anchoredCard.getBoundingClientRect().top -
+      container.getBoundingClientRect().top;
+    container.scrollTop += currentOffset - anchor.offset;
+  } else {
+    container.scrollTop =
+      anchor.scrollTop + (container.scrollHeight - anchor.scrollHeight);
+  }
+  const state = historyStateFor(container.id.replace(/^msgs-/, ""));
+  state.lastScrollTop = container.scrollTop;
+  state.suppressUntil = Date.now() + 250;
+}
+
+async function loadOlderArchive(triggerContainer) {
+  if (!triggerContainer) return;
+  const colId = triggerContainer.id.replace(/^msgs-/, "");
+  const state = historyStateFor(colId);
+  const channel = triggerContainer.closest(".channel-column")?.dataset.channel;
+  if (
+    !channel ||
+    state.loading ||
+    !state.hasMore ||
+    state.oldestId === null ||
+    Date.now() < state.suppressUntil
+  ) return;
+  state.loading = true;
+  const scrollAnchor = captureFeedScrollAnchor(triggerContainer);
   document.getElementById("search-status").innerText =
-    "Loading older transmissions…";
+    `Loading older ${channel} transmissions…`;
   try {
     await loadArchive({
-      beforeId: oldestLoadedTranscriptId,
-      scrollPositions,
+      beforeId: state.oldestId,
+      channel,
+      scrollAnchor,
+      triggerContainer,
     });
   } catch (error) {
-    showToast("Older transmissions could not be loaded.", "danger");
-    recordConsoleEvent("error", "Older archive load failed", error.message);
+    showToast(`Older ${channel} transmissions could not be loaded.`, "danger");
+    recordConsoleEvent("error", `Older ${channel} archive load failed`, error.message);
   } finally {
-    loadingOlderTranscripts = false;
+    state.loading = false;
     updateSearchResults();
   }
 }
@@ -1510,6 +1570,7 @@ function processIncomingData(data, options = {}) {
 
   const colId = getColumnId(channelName);
   const container = document.getElementById(`msgs-${colId}`);
+  updateFeedHistoryCursor(colId, data);
   const card = createMessageCard(data);
   if (options.animate === false) {
     card.classList.add("no-entry-animation");
@@ -1889,6 +1950,18 @@ consoleServiceFilter.addEventListener("change", () => {
   fetchConsoleEntries();
 });
 consoleLevelFilter.addEventListener("change", renderConsoleEntries);
+consoleSearchInput.addEventListener("input", renderConsoleEntries);
+document.getElementById("console-wrap-button").addEventListener("click", (event) => {
+  const noWrap = consoleOutput.classList.toggle("console-no-wrap");
+  event.currentTarget.textContent = noWrap ? "Wrap" : "No wrap";
+});
+document.getElementById("console-copy-button").addEventListener("click", async () => {
+  await navigator.clipboard.writeText(consoleOutput.innerText);
+  showToast("Visible console events copied.", "success");
+});
+document.getElementById("console-diagnostics-button").addEventListener("click", () => {
+  window.location.assign("/api/diagnostics.zip");
+});
 
 document.getElementById("logout-button").addEventListener("click", async () => {
   await fetch("/api/logout", { method: "POST" });
@@ -1902,8 +1975,17 @@ document.addEventListener("change", (event) => {
 });
 
 function handleFeedScroll(container) {
-  if (restoringArchiveScroll) return;
   const columnId = container.id.replace(/^msgs-/, "");
+  const historyState = historyStateFor(columnId);
+  const previousScrollTop = historyState.lastScrollTop;
+  historyState.lastScrollTop = container.scrollTop;
+  if (
+    historyState.loading ||
+    container.classList.contains("history-restoring") ||
+    Date.now() < historyState.suppressUntil
+  ) {
+    return;
+  }
   const distanceFromBottom =
     container.scrollHeight - container.scrollTop - container.clientHeight;
   if (distanceFromBottom > 80 && autoScrollState[columnId]) {
@@ -1913,7 +1995,9 @@ function handleFeedScroll(container) {
     );
     setFollowButtonState(columnId, button);
   }
-  if (container.scrollTop <= 80) loadOlderArchive(container);
+  if (container.scrollTop <= 40 && container.scrollTop < previousScrollTop - 1) {
+    loadOlderArchive(container);
+  }
 }
 
 document.addEventListener(
@@ -1930,7 +2014,7 @@ document.addEventListener(
   "wheel",
   (event) => {
     const container = event.target.closest?.(".messages-container");
-    if (container && event.deltaY < 0 && container.scrollTop <= 80) {
+    if (container && event.deltaY < 0 && container.scrollTop <= 40) {
       loadOlderArchive(container);
     }
   },
@@ -2055,6 +2139,8 @@ function connectWebSocket() {
         window.setTimeout(() => window.location.reload(), 250);
       } else if (payload.type?.startsWith("alert")) {
         window.phaseFourHandleEvent?.(payload);
+      } else if (payload.type?.startsWith("incident")) {
+        window.phaseFiveHandleEvent?.(payload);
       } else if (!payload.type && payload.transcript_text) {
         processIncomingData(payload);
       }

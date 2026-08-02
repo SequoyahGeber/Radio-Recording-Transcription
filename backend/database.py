@@ -40,6 +40,14 @@ TRANSCRIPT_COLUMNS = {
     "retry_quality_metrics": "TEXT",
     "retry_status": "TEXT",
     "retry_attempted_at": "TEXT",
+    "primary_quality_score": "REAL",
+    "primary_quality_reason": "TEXT",
+    "primary_quality_metrics": "TEXT",
+    "primary_status": "TEXT",
+    "primary_model": "TEXT",
+    "retry_trigger_reason": "TEXT NOT NULL DEFAULT ''",
+    "selection_reason": "TEXT NOT NULL DEFAULT 'Medium result selected by default'",
+    "selected_transcript": "TEXT NOT NULL DEFAULT 'primary'",
 }
 
 FTS_SCHEMA_VERSION = "1"
@@ -225,9 +233,10 @@ def connect(read_only=False):
             f"file:{DB_NAME}?mode=ro",
             uri=True,
             timeout=15,
+            check_same_thread=False,
         )
     else:
-        connection = sqlite3.connect(DB_NAME, timeout=15)
+        connection = sqlite3.connect(DB_NAME, timeout=15, check_same_thread=False)
     connection.row_factory = sqlite3.Row
     try:
         yield connection
@@ -471,6 +480,158 @@ def initialize_database():
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS transcription_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_type TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                transcript_id INTEGER,
+                priority INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'queued',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 20,
+                scheduled_at TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                last_error TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(job_type, relative_path),
+                FOREIGN KEY(transcript_id) REFERENCES transcripts(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_transcription_jobs_dispatch
+                ON transcription_jobs(status, scheduled_at, priority, id);
+            CREATE INDEX IF NOT EXISTS idx_transcription_jobs_transcript
+                ON transcription_jobs(transcript_id, id DESC);
+
+            CREATE TABLE IF NOT EXISTS channel_glossaries (
+                channel TEXT PRIMARY KEY,
+                terms_json TEXT NOT NULL DEFAULT '[]',
+                language TEXT NOT NULL DEFAULT 'en',
+                version INTEGER NOT NULL DEFAULT 1,
+                updated_by TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS model_downloads (
+                model_key TEXT PRIMARY KEY,
+                repo_id TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'not_installed',
+                downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+                total_bytes INTEGER NOT NULL DEFAULT 0,
+                files_completed INTEGER NOT NULL DEFAULT 0,
+                files_total INTEGER NOT NULL DEFAULT 0,
+                eta_seconds INTEGER,
+                error TEXT NOT NULL DEFAULT '',
+                control TEXT NOT NULL DEFAULT 'run',
+                started_at TEXT,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS backup_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                backup_path TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL,
+                database_bytes INTEGER NOT NULL DEFAULT 0,
+                transcript_count INTEGER NOT NULL DEFAULT 0,
+                sha256 TEXT NOT NULL DEFAULT '',
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                verified_at TEXT,
+                last_error TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_backup_history_created
+                ON backup_history(created_at DESC, id DESC);
+
+            CREATE TABLE IF NOT EXISTS transcript_segments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                transcript_id INTEGER NOT NULL,
+                result_kind TEXT NOT NULL,
+                segment_index INTEGER NOT NULL,
+                start_seconds REAL NOT NULL,
+                end_seconds REAL NOT NULL,
+                text TEXT NOT NULL,
+                confidence REAL,
+                UNIQUE(transcript_id, result_kind, segment_index),
+                FOREIGN KEY(transcript_id) REFERENCES transcripts(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_transcript_segments_transcript
+                ON transcript_segments(transcript_id, result_kind, segment_index);
+
+            CREATE TABLE IF NOT EXISTS channel_transcription_profiles (
+                channel TEXT PRIMARY KEY,
+                normalize_audio INTEGER NOT NULL DEFAULT 0,
+                denoise_audio INTEGER NOT NULL DEFAULT 0,
+                language_mode TEXT NOT NULL DEFAULT 'explicit',
+                experimental_enabled INTEGER NOT NULL DEFAULT 0,
+                version INTEGER NOT NULL DEFAULT 1,
+                updated_by TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS incidents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                severity TEXT NOT NULL DEFAULT 'informational',
+                status TEXT NOT NULL DEFAULT 'monitoring',
+                owner_username TEXT,
+                location TEXT NOT NULL DEFAULT '',
+                summary TEXT NOT NULL DEFAULT '',
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                started_at TEXT NOT NULL,
+                resolved_at TEXT,
+                version INTEGER NOT NULL DEFAULT 1,
+                created_by TEXT NOT NULL,
+                updated_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_incidents_status_severity
+                ON incidents(status, severity, started_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_incidents_owner_status
+                ON incidents(owner_username, status, updated_at DESC, id DESC);
+
+            CREATE TABLE IF NOT EXISTS incident_transcripts (
+                incident_id INTEGER NOT NULL,
+                transcript_id INTEGER NOT NULL,
+                added_by TEXT NOT NULL,
+                added_at TEXT NOT NULL,
+                PRIMARY KEY(incident_id, transcript_id),
+                FOREIGN KEY(incident_id) REFERENCES incidents(id),
+                FOREIGN KEY(transcript_id) REFERENCES transcripts(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_incident_transcripts_transcript
+                ON incident_transcripts(transcript_id, incident_id);
+
+            CREATE TABLE IF NOT EXISTS incident_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                incident_id INTEGER NOT NULL,
+                description TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                assigned_to TEXT,
+                due_at TEXT,
+                version INTEGER NOT NULL DEFAULT 1,
+                created_by TEXT NOT NULL,
+                updated_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(incident_id) REFERENCES incidents(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_incident_tasks_incident_status
+                ON incident_tasks(incident_id, status, id);
+
+            CREATE TABLE IF NOT EXISTS incident_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                incident_id INTEGER NOT NULL,
+                note TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(incident_id) REFERENCES incidents(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_incident_notes_incident
+                ON incident_notes(incident_id, id DESC);
+
             CREATE VIRTUAL TABLE IF NOT EXISTS transcripts_fts USING fts5(
                 transcript_text,
                 notes,
@@ -532,6 +693,28 @@ def initialize_database():
             SET raw_transcript_text = transcript_text
             WHERE raw_transcript_text IS NULL
             """
+        )
+        connection.execute(
+            """
+            UPDATE transcripts
+            SET primary_quality_score = coalesce(primary_quality_score, quality_score),
+                primary_quality_reason = coalesce(primary_quality_reason, quality_reason),
+                primary_quality_metrics = coalesce(primary_quality_metrics, quality_metrics),
+                primary_status = coalesce(primary_status, status),
+                primary_model = coalesce(primary_model, transcription_model),
+                selected_transcript = CASE
+                    WHEN retry_status = 'selected' THEN 'retry'
+                    ELSE coalesce(nullif(selected_transcript, ''), 'primary')
+                END
+            """
+        )
+        connection.execute(
+            """
+            UPDATE transcription_jobs
+            SET status = 'queued', started_at = NULL, updated_at = ?
+            WHERE status = 'running'
+            """,
+            (datetime.now().isoformat(),),
         )
         seed_default_alert_rules(connection)
         backfill_archive_metadata(connection)

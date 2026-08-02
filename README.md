@@ -24,6 +24,13 @@ them with Whisper, and presents a secure live operations dashboard.
   stream so every connected operator sees changes without refreshing.
 - Presence counts unique authenticated users rather than browser tabs, and
   version preconditions prevent silent multi-user overwrites.
+- The incident workspace groups transmissions into shared timelines with
+  severity, owner, location, tags, tasks, timestamped notes, and live updates.
+- Shift handoff reports combine open incidents, active alerts, recent
+  bookmarks, open tasks, and system issues into a copyable or downloadable brief.
+- Five actionable health components explain source, sync, transcription,
+  delivery, and storage state with last success, queue depth, errors, and safe
+  recovery guidance. Administrators can export a redacted diagnostics bundle.
 - Repetitive or low-confidence transcripts are quarantined for supervisor review.
 - Operators use a five-state review workflow, bookmarks, notes, immutable
   change history, and an eight-second undo window.
@@ -39,7 +46,8 @@ them with Whisper, and presents a secure live operations dashboard.
   focus mode, filters, density, and alert visibility in SQLite.
 - The `⌘K` command palette and keyboard shortcuts cover routine review,
   bookmark, note, correction, feed, search, and audio actions.
-- Operators can inspect browser, server, transcription, and sync events in the dashboard console.
+- Operators can inspect browser, server, transcription, and sync events in the
+  resizable dashboard console with search, wrapping, copying, and diagnostics.
 - A native Mac launcher embeds the secure dashboard alongside service and folder controls.
 - Administrators can pause or resume transcription without stopping the dashboard or sync service.
 - Administrators can check GitHub Releases and install verified app updates in place.
@@ -71,10 +79,10 @@ the selected state persists across app restarts and updates.
 
 ## Clearance profiles
 
-- **Viewer:** transcripts, archive search, bookmarks, and alert inbox view; no
-  source audio.
+- **Viewer:** transcripts, archive search, bookmarks, alert inbox, incidents,
+  shift handoff, and health-center view; no source audio.
 - **Operator:** viewer access plus audio, review state, bookmarks, notes, alert
-  acknowledgement, assignment, and resolution.
+  acknowledgement/assignment/resolution, and incident/task coordination.
 - **Supervisor:** operator access plus suspect transcripts, corrections,
   exports, alert-rule management, and false-positive classification.
 - **Administrator:** supervisor access plus profile management, program console,
@@ -84,6 +92,17 @@ The first-launch setup creates the administrator profile. It is available only
 until that first profile has been saved, so setup cannot be repeated to replace
 an existing administrator. Administrators can add or update profiles from the
 dashboard control bar. At least one active administrator is always required.
+
+Phase Six adds durable primary and Large V3 rescue queues, background model
+readiness controls, per-channel radio-term glossaries, and supervisor-visible
+Medium/Large V3 comparison with plain-language selection reasons. See
+`docs/phase-six-handoff.md` for its validation evidence and operating details.
+
+Phase Seven adds guided deployment readiness, automatic verified backups,
+restore drills, and adaptive native Mac controls. Phase Eight adds real-audio
+quality analytics, timestamped segment seeking, and evidence-gated channel
+audio profiles. See `docs/phase-seven-eight-handoff.md` for the final acceptance
+evidence.
 
 ## Transcript quality
 
@@ -239,10 +258,13 @@ visibility, model management, and updater safety. The API suite verifies FTS5
 phrases, prefixes, snippets, facets, exact year counts, cursors, reindexing,
 preferences, saved-search authorization, alert matching/deduplication,
 acknowledgement conflicts, event replay, two-user WebSocket propagation, and
-unique-user presence. The Playwright suite starts an isolated HTTPS server,
+unique-user presence. It also verifies incident concurrency, transmission
+linking, tasks, notes, shift handoff, actionable health, and redacted diagnostic
+archives. The Playwright suite starts an isolated HTTPS server,
 creates 176 disposable transmissions across eight realistic feeds and three
 years, and checks authentication, indexed archive search, filtering,
 pagination, saved views, the alert inbox, rule testing, acknowledgement,
+incident creation/linking/tasks, shift handoff, the five-part health center,
 overlay controls, the console, detail editing and undo, the global player,
 shortcuts, workspaces, full export, mobile feed navigation, and feed geometry
 from 320 through 1,920 pixels in the installed stable Google Chrome.

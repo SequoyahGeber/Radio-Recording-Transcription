@@ -6,6 +6,7 @@ import secrets
 import sys
 import tempfile
 import unittest
+import zipfile
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -95,6 +96,70 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(len(normal), 1)
         self.assertEqual(len(reviewed), 2)
 
+    def test_history_paginates_one_channel_without_leaking_other_feeds(self):
+        with connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO transcripts(
+                    timestamp, recorded_at, channel, filename,
+                    transcript_text, raw_transcript_text,
+                    quality_score, quality_reason, status
+                ) VALUES (?, ?, ?, ?, ?, ?, 1.0, '', 'ready')
+                """,
+                [
+                    (
+                        "2026-08-01T10:00:05",
+                        "2026-08-01T10:00:00",
+                        "Paging Alpha",
+                        "Paging Alpha/2026-08-01-10-00-00-Paging Alpha.mp3",
+                        "alpha older message",
+                        "alpha older message",
+                    ),
+                    (
+                        "2026-08-01T10:01:05",
+                        "2026-08-01T10:01:00",
+                        "Paging Bravo",
+                        "Paging Bravo/2026-08-01-10-01-00-Paging Bravo.mp3",
+                        "bravo message",
+                        "bravo message",
+                    ),
+                    (
+                        "2026-08-01T10:02:05",
+                        "2026-08-01T10:02:00",
+                        "Paging Alpha",
+                        "Paging Alpha/2026-08-01-10-02-00-Paging Alpha.mp3",
+                        "alpha newer message",
+                        "alpha newer message",
+                    ),
+                ],
+            )
+            connection.commit()
+
+        newest = self.client.get(
+            "/api/history",
+            params={"channel": "Paging Alpha", "limit": 1},
+        )
+        self.assertEqual(newest.status_code, 200)
+        self.assertEqual(
+            [row["transcript_text"] for row in newest.json()],
+            ["alpha newer message"],
+        )
+
+        older = self.client.get(
+            "/api/history",
+            params={
+                "channel": "Paging Alpha",
+                "before_id": newest.json()[0]["id"],
+                "limit": 10,
+            },
+        )
+        self.assertEqual(older.status_code, 200)
+        self.assertEqual(
+            [row["transcript_text"] for row in older.json()],
+            ["alpha older message"],
+        )
+        self.assertTrue(all(row["channel"] == "Paging Alpha" for row in older.json()))
+
     def test_profile_clearance_and_transcript_updates(self):
         create_response = self.client.post(
             "/api/users",
@@ -118,6 +183,16 @@ class ApiIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(viewer.get("/api/export.csv").status_code, 403)
         self.assertEqual(viewer.get("/api/console").status_code, 403)
+        self.assertEqual(viewer.get("/api/incidents").status_code, 200)
+        self.assertEqual(viewer.get("/api/health-center").status_code, 200)
+        self.assertEqual(viewer.get("/api/diagnostics.zip").status_code, 403)
+        self.assertEqual(
+            viewer.post(
+                "/api/incidents",
+                json={"title": "Viewer must not create this"},
+            ).status_code,
+            403,
+        )
         self.assertEqual(
             viewer.get("/audio/Alpha/2026-07-25-09-59-55-Alpha.mp3").status_code,
             403,
@@ -167,6 +242,15 @@ class ApiIntegrationTests(unittest.TestCase):
                 ),
             )
             transcript_id = cursor.lastrowid
+            connection.execute(
+                """
+                INSERT INTO transcript_segments(
+                    transcript_id, result_kind, segment_index,
+                    start_seconds, end_seconds, text, confidence
+                ) VALUES (?, 'primary', 0, 0.0, 1.2, 'hello hello', 0.4)
+                """,
+                (transcript_id,),
+            )
             connection.commit()
         try:
             detail = self.client.get(f"/api/transcripts/{transcript_id}")
@@ -552,6 +636,20 @@ class ApiIntegrationTests(unittest.TestCase):
             self.assertEqual(dashboard.status_code, 303)
             self.assertEqual(dashboard.headers["location"], "/setup")
             self.assertEqual(fresh_client.get("/setup").status_code, 200)
+            readiness = fresh_client.get("/api/setup/status")
+            self.assertEqual(readiness.status_code, 200)
+            self.assertEqual(len(readiness.json()["models"]), 2)
+            configured = fresh_client.post(
+                "/api/setup/configure",
+                json={
+                    "source_dir": SOURCE_DIR,
+                    "transcription_enabled": False,
+                    "minimum_free_gb": 2,
+                    "setup_step": 3,
+                },
+            )
+            self.assertEqual(configured.status_code, 200)
+            self.assertTrue(configured.json()["source"]["readable"])
             self.assertEqual(
                 fresh_client.post(
                     "/api/setup",
@@ -1264,6 +1362,239 @@ class ApiIntegrationTests(unittest.TestCase):
             ).status_code,
             400,
         )
+
+    def test_incident_workflow_handoff_health_and_diagnostics(self):
+        transcript_id = self.client.get("/api/history").json()[0]["id"]
+        created = self.client.post(
+            "/api/incidents",
+            json={
+                "title": "North gate response",
+                "severity": "urgent",
+                "status": "active",
+                "owner_username": "admin",
+                "location": "North gate",
+                "summary": "Coordinate medical access and gate control.",
+                "tags": ["medical", "gate"],
+            },
+        )
+        self.assertEqual(created.status_code, 200)
+        incident = created.json()
+        incident_id = incident["id"]
+        try:
+            linked = self.client.post(
+                f"/api/incidents/{incident_id}/transcripts",
+                json={"transcript_id": transcript_id},
+            )
+            self.assertEqual(linked.status_code, 200)
+            self.assertEqual(linked.json()["transcript_count"], 1)
+
+            task = self.client.post(
+                f"/api/incidents/{incident_id}/tasks",
+                json={"description": "Confirm responder arrival", "assigned_to": "admin"},
+            )
+            self.assertEqual(task.status_code, 200)
+            completed = self.client.patch(
+                f"/api/incident-tasks/{task.json()['id']}",
+                json={"status": "done", "version": task.json()["version"]},
+            )
+            self.assertEqual(completed.status_code, 200)
+            self.assertEqual(completed.json()["status"], "done")
+
+            note = self.client.post(
+                f"/api/incidents/{incident_id}/notes",
+                json={"note": "Medic unit is approaching from the service road."},
+            )
+            self.assertEqual(note.status_code, 200)
+            detail = self.client.get(f"/api/incidents/{incident_id}").json()
+            self.assertEqual(len(detail["transcripts"]), 1)
+            self.assertEqual(len(detail["tasks"]), 1)
+            self.assertEqual(len(detail["notes"]), 1)
+
+            update_payload = {
+                "title": incident["title"],
+                "severity": incident["severity"],
+                "status": "stabilized",
+                "owner_username": incident["owner_username"],
+                "location": incident["location"],
+                "summary": incident["summary"],
+                "tags": incident["tags"],
+                "started_at": incident["started_at"],
+                "version": incident["version"],
+            }
+            updated = self.client.patch(
+                f"/api/incidents/{incident_id}", json=update_payload
+            )
+            self.assertEqual(updated.status_code, 200)
+            self.assertEqual(updated.json()["status"], "stabilized")
+            stale = self.client.patch(
+                f"/api/incidents/{incident_id}", json=update_payload
+            )
+            self.assertEqual(stale.status_code, 409)
+            self.assertEqual(stale.json()["current"]["version"], updated.json()["version"])
+
+            handoff = self.client.get("/api/shift-handoff", params={"hours": 12})
+            self.assertEqual(handoff.status_code, 200)
+            self.assertTrue(
+                any(item["id"] == incident_id for item in handoff.json()["incidents"])
+            )
+            handoff_text = self.client.get(
+                "/api/shift-handoff", params={"hours": 12, "format": "text"}
+            )
+            self.assertIn("North gate response", handoff_text.text)
+
+            health = self.client.get("/api/health-center")
+            self.assertEqual(health.status_code, 200)
+            self.assertEqual(
+                [item["id"] for item in health.json()["components"]],
+                ["source", "sync", "transcription", "delivery", "storage"],
+            )
+
+            diagnostics = self.client.get("/api/diagnostics.zip")
+            self.assertEqual(diagnostics.status_code, 200)
+            with zipfile.ZipFile(io.BytesIO(diagnostics.content)) as archive:
+                self.assertEqual(
+                    set(archive.namelist()),
+                    {
+                        "diagnostics.json",
+                        "health-center.json",
+                        "shift-handoff.txt",
+                        "logs/server.log",
+                        "logs/worker.log",
+                        "logs/sync.log",
+                    },
+                )
+                self.assertIn(
+                    '"database_quick_check": "ok"',
+                    archive.read("diagnostics.json").decode("utf-8"),
+                )
+                self.assertNotIn(
+                    "medical requested at north gate",
+                    archive.read("shift-handoff.txt").decode("utf-8"),
+                )
+        finally:
+            with connect() as connection:
+                connection.execute(
+                    "DELETE FROM incident_notes WHERE incident_id = ?", (incident_id,)
+                )
+                connection.execute(
+                    "DELETE FROM incident_tasks WHERE incident_id = ?", (incident_id,)
+                )
+                connection.execute(
+                    "DELETE FROM incident_transcripts WHERE incident_id = ?", (incident_id,)
+                )
+                connection.execute("DELETE FROM incidents WHERE id = ?", (incident_id,))
+                connection.commit()
+
+
+    def test_phase_six_model_queue_glossary_and_manual_selection(self):
+        with connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO transcripts(
+                    timestamp, recorded_at, channel, filename, transcript_text,
+                    raw_transcript_text, quality_score, quality_reason,
+                    quality_metrics, status, transcription_model,
+                    primary_quality_score, primary_quality_reason,
+                    primary_quality_metrics, primary_status, primary_model,
+                    retry_transcript_text, retry_model, retry_quality_score,
+                    retry_quality_reason, retry_quality_metrics, retry_status,
+                    retry_trigger_reason, selection_reason, selected_transcript
+                ) VALUES (
+                    '2026-08-01T10:00:00', '2026-08-01T09:59:55', 'Medical',
+                    'Medical/phase-six-selection.wav',
+                    'Clear message from the west checkpoint',
+                    'hello hello hello hello hello', 0.95, '', '{}', 'ready',
+                    'mlx-community/whisper-large-v3-mlx',
+                    0.1, 'One word dominates the transcript', '{}', 'suspect',
+                    'mlx-community/whisper-medium-mlx',
+                    'Clear message from the west checkpoint',
+                    'mlx-community/whisper-large-v3-mlx', 0.95, '', '{}',
+                    'selected', 'Large V3 retry requested because repetition',
+                    'Large V3 selected automatically', 'retry'
+                )
+                """
+            )
+            transcript_id = cursor.lastrowid
+            connection.execute(
+                """
+                INSERT INTO transcript_segments(
+                    transcript_id, result_kind, segment_index,
+                    start_seconds, end_seconds, text, confidence
+                ) VALUES (?, 'primary', 0, 0.0, 1.2, 'hello hello', 0.4)
+                """,
+                (transcript_id,),
+            )
+            connection.commit()
+
+        models = self.client.get("/api/models/status")
+        self.assertEqual(models.status_code, 200)
+        self.assertEqual(
+            {item["model_key"] for item in models.json()["models"]},
+            {"medium", "large-v3"},
+        )
+
+        glossary = self.client.put(
+            "/api/glossaries/Medical",
+            json={"terms": ["Alpha One", "North Gate"], "language": "en"},
+        )
+        self.assertEqual(glossary.status_code, 200)
+        self.assertEqual(glossary.json()["terms"], ["Alpha One", "North Gate"])
+        self.assertIn(
+            "Medical",
+            self.client.get("/api/glossaries").json()["channels"],
+        )
+
+        detail = self.client.get(f"/api/transcripts/{transcript_id}").json()
+        self.assertEqual(detail["segments"]["primary"][0]["start_seconds"], 0.0)
+        selected = self.client.patch(
+            f"/api/transcripts/{transcript_id}/selection",
+            json={"selection": "primary", "version": detail["version"]},
+        )
+        self.assertEqual(selected.status_code, 200)
+        self.assertEqual(selected.json()["selected_transcript"], "primary")
+        self.assertIn("hello hello", selected.json()["transcript_text"])
+        self.assertIn("selected manually", selected.json()["selection_reason"])
+        stale = self.client.patch(
+            f"/api/transcripts/{transcript_id}/selection",
+            json={"selection": "retry", "version": detail["version"]},
+        )
+        self.assertEqual(stale.status_code, 409)
+
+    def test_phase_seven_backup_verification_and_restore_drill(self):
+        created = self.client.post("/api/backups")
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(created.json()["status"], "verified")
+        backup_id = created.json()["id"]
+        verified = self.client.post(f"/api/backups/{backup_id}/verify")
+        self.assertEqual(verified.status_code, 200)
+        drill = self.client.post(f"/api/backups/{backup_id}/restore-drill")
+        self.assertEqual(drill.status_code, 200)
+        self.assertEqual(drill.json()["status"], "passed")
+        self.assertGreater(drill.json()["transcript_count"], 0)
+        analytics = self.client.get("/api/quality-analytics")
+        self.assertEqual(analytics.status_code, 200)
+        self.assertIn("evaluation_gate", analytics.json()["analytics"])
+        normalized = self.client.put(
+            "/api/transcription-profiles/Medical",
+            json={
+                "normalize_audio": True,
+                "denoise_audio": False,
+                "language_mode": "explicit",
+                "experimental_enabled": False,
+            },
+        )
+        self.assertEqual(normalized.status_code, 200)
+        self.assertTrue(normalized.json()["normalize_audio"])
+        gated = self.client.put(
+            "/api/transcription-profiles/Medical",
+            json={
+                "normalize_audio": True,
+                "denoise_audio": True,
+                "language_mode": "detect",
+                "experimental_enabled": True,
+            },
+        )
+        self.assertEqual(gated.status_code, 400)
 
 
 if __name__ == "__main__":

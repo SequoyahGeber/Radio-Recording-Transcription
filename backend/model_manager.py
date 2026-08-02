@@ -1,6 +1,8 @@
 import os
+import time
 
 from huggingface_hub import snapshot_download, try_to_load_from_cache
+from tqdm.auto import tqdm
 
 
 PRIMARY_MLX_MODEL = os.environ.get(
@@ -11,6 +13,25 @@ RETRY_MLX_MODEL = os.environ.get(
     "RADIO_RETRY_MLX_MODEL",
     "mlx-community/whisper-large-v3-mlx",
 )
+
+
+class ModelDownloadCancelled(RuntimeError):
+    pass
+
+
+def _progress_class(progress_callback=None, control_callback=None):
+    class ModelProgress(tqdm):
+        def update(self, amount=1):
+            while control_callback and control_callback() == "pause":
+                time.sleep(0.25)
+            if control_callback and control_callback() == "cancel":
+                raise ModelDownloadCancelled("Model download cancelled")
+            changed = super().update(amount)
+            if progress_callback:
+                progress_callback(int(self.n), int(self.total or 0), str(self.desc or ""))
+            return changed
+
+    return ModelProgress
 
 
 def model_cache_dir(model_dir):
@@ -38,7 +59,24 @@ def model_is_cached(repo_id, model_dir):
     return isinstance(config_path, str) and isinstance(weights_path, str)
 
 
-def ensure_model(repo_id, model_dir):
+def estimate_model_size(repo_id, model_dir):
+    files = snapshot_download(
+        repo_id=repo_id,
+        cache_dir=model_cache_dir(model_dir),
+        allow_patterns=["config.json", "weights.npz", "weights.safetensors"],
+        dry_run=True,
+    )
+    total = sum(int(getattr(item, "file_size", 0) or 0) for item in files)
+    return {"bytes": total, "files": len(files)}
+
+
+def ensure_model(
+    repo_id,
+    model_dir,
+    *,
+    progress_callback=None,
+    control_callback=None,
+):
     os.makedirs(model_dir, exist_ok=True)
     if model_is_cached(repo_id, model_dir):
         return {
@@ -59,6 +97,7 @@ def ensure_model(repo_id, model_dir):
                 "weights.npz",
                 "weights.safetensors",
             ],
+            tqdm_class=_progress_class(progress_callback, control_callback),
         )
     finally:
         if previous_progress_setting is None:

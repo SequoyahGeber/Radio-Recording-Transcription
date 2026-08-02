@@ -132,6 +132,7 @@ function phaseTwoHistoryLabel(entry) {
     review: "Review updated",
     correction: "Transcript corrected",
     annotation: "Annotation updated",
+    model_selection: "Model result selected",
   }[entry.change_type] || "Transmission updated";
   const changedAt = new Date(entry.changed_at);
   const time = Number.isNaN(changedAt.getTime())
@@ -165,8 +166,23 @@ function phaseTwoRenderDetail(detail) {
           : ""
       }`
     : "Not yet reviewed";
-  document.getElementById("drawer-transcript").textContent =
-    detail.transcript_text || "";
+  const transcriptView = document.getElementById("drawer-transcript");
+  const selectedSegments =
+    detail.segments?.[detail.selected_transcript || "primary"] || [];
+  transcriptView.replaceChildren();
+  if (selectedSegments.length) {
+    selectedSegments.forEach((segment) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "transcript-segment-button";
+      button.dataset.start = segment.start_seconds;
+      button.title = `Play from ${Number(segment.start_seconds).toFixed(1)} seconds`;
+      button.textContent = segment.text;
+      transcriptView.append(button, document.createTextNode(" "));
+    });
+  } else {
+    transcriptView.textContent = detail.transcript_text || "";
+  }
   document.getElementById("drawer-notes").value = detail.notes || "";
   document.getElementById("drawer-correction").value =
     detail.transcript_text || "";
@@ -180,6 +196,28 @@ function phaseTwoRenderDetail(detail) {
     detail.raw_transcript_text || "No separate original result stored.";
   document.getElementById("drawer-retry-transcript").textContent =
     detail.retry_transcript_text || "No Large V3 retry was required.";
+  document.getElementById("drawer-retry-reason").textContent =
+    detail.retry_trigger_reason || "No automatic retry explanation is available.";
+  document.getElementById("drawer-selection-reason").textContent =
+    detail.selection_reason || "Medium result selected by default.";
+  const primaryArticle = document
+    .getElementById("drawer-select-primary")
+    .closest("article");
+  const retryArticle = document
+    .getElementById("drawer-select-retry")
+    .closest("article");
+  primaryArticle.classList.toggle(
+    "is-selected",
+    (detail.selected_transcript || "primary") === "primary",
+  );
+  retryArticle.classList.toggle(
+    "is-selected",
+    detail.selected_transcript === "retry",
+  );
+  const canSelectModel = Boolean(currentProfile?.permissions?.correct);
+  document.getElementById("drawer-select-primary").disabled = !canSelectModel;
+  document.getElementById("drawer-select-retry").disabled =
+    !canSelectModel || !detail.retry_transcript_text;
 
   const correctionSection = document.getElementById(
     "drawer-correction-section",
@@ -264,6 +302,29 @@ async function phaseTwoPatchTranscript(transcriptId, changes, version) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...changes, version }),
   });
+}
+
+async function phaseTwoSelectModel(selection) {
+  const detail = phaseTwoState.detail;
+  if (!detail) return;
+  try {
+    const result = await phaseTwoJson(
+      `/api/transcripts/${detail.id}/selection`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ selection, version: detail.version }),
+      },
+    );
+    phaseTwoReplaceCard(result);
+    phaseTwoRenderDetail(await phaseTwoJson(`/api/transcripts/${detail.id}`));
+    showToast(
+      selection === "retry" ? "Large V3 result selected." : "Medium result selected.",
+      "success",
+    );
+  } catch (error) {
+    showToast(error.message, "danger");
+  }
 }
 
 function phaseTwoUndoValues(before, changes) {
@@ -756,6 +817,12 @@ document
   .getElementById("drawer-save-button")
   .addEventListener("click", phaseTwoSaveDrawer);
 document
+  .getElementById("drawer-select-primary")
+  .addEventListener("click", () => phaseTwoSelectModel("primary"));
+document
+  .getElementById("drawer-select-retry")
+  .addEventListener("click", () => phaseTwoSelectModel("retry"));
+document
   .getElementById("drawer-bookmark-button")
   .addEventListener("click", async () => {
     const detail = phaseTwoState.detail;
@@ -781,6 +848,14 @@ document.getElementById("drawer-copy-button").addEventListener("click", async ()
 document.getElementById("drawer-play-button").addEventListener("click", () => {
   const card = phaseTwoCardById(phaseTwoState.detail?.id);
   if (card) phaseTwoPlayCard(card);
+});
+document.getElementById("drawer-transcript").addEventListener("click", (event) => {
+  const segment = event.target.closest("button[data-start]");
+  if (!segment) return;
+  const card = phaseTwoCardById(phaseTwoState.detail?.id);
+  if (card && phaseTwoState.playerCard !== card) phaseTwoPlayCard(card);
+  phaseTwoAudio.currentTime = Number(segment.dataset.start || 0);
+  phaseTwoAudio.play().catch(() => showToast("Audio unavailable or missing.", "danger"));
 });
 
 document.getElementById("player-toggle").addEventListener("click", () => {

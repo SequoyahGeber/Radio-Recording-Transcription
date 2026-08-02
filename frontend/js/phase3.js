@@ -27,8 +27,16 @@ const phaseThreeFilterIds = {
 function phaseThreeOpenView() {
   dashboard.hidden = true;
   document.getElementById("empty-state").hidden = true;
+  document.getElementById("alert-inbox-view").hidden = true;
+  document.getElementById("incident-workspace-view").hidden = true;
+  document.getElementById("health-center-view").hidden = true;
   phaseThreeView.hidden = false;
   document.body.classList.add("archive-search-mode");
+  document.body.classList.remove(
+    "alert-inbox-mode",
+    "incident-workspace-mode",
+    "health-center-mode",
+  );
 }
 
 function phaseThreeCloseView() {

@@ -58,6 +58,122 @@ test("administrator can sign in and scan a realistic multi-feed board", async ({
   expect(pageErrors).toEqual([]);
 });
 
+test("older messages load only in the scrolled feed without moving its anchor", async ({
+  page,
+}) => {
+  const pageErrors = [];
+  const olderHistoryRequests = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === "/api/history" && url.searchParams.has("before_id")) {
+      olderHistoryRequests.push(url);
+    }
+  });
+  await signIn(page);
+
+  const medical = page.locator('.channel-column[data-channel="Medical"]');
+  const security = page.locator('.channel-column[data-channel="Security"]');
+  const medicalMessages = medical.locator(".message-card");
+  const securityMessages = security.locator(".message-card");
+  const medicalBefore = await medicalMessages.count();
+  const securityBefore = await securityMessages.count();
+  const medicalScroller = medical.locator(".messages-container");
+
+  const anchorBefore = await medicalScroller.evaluate(async (container) => {
+    container.scrollTop = container.scrollHeight;
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    container.scrollTop = 0;
+    const card = container.querySelector(".message-card[data-transcript-id]");
+    return {
+      id: card?.dataset.transcriptId,
+      offset:
+        card.getBoundingClientRect().top - container.getBoundingClientRect().top,
+    };
+  });
+
+  await expect.poll(() => medicalMessages.count()).toBeGreaterThan(medicalBefore);
+  await expect(securityMessages).toHaveCount(securityBefore);
+  const anchorAfter = await medicalScroller.evaluate((container, id) => {
+    const card = container.querySelector(`[data-transcript-id="${CSS.escape(id)}"]`);
+    return {
+      offset:
+        card.getBoundingClientRect().top - container.getBoundingClientRect().top,
+      scrollTop: container.scrollTop,
+    };
+  }, anchorBefore.id);
+
+  expect(Math.abs(anchorAfter.offset - anchorBefore.offset)).toBeLessThanOrEqual(2);
+  expect(anchorAfter.scrollTop).toBeGreaterThan(0);
+  expect(olderHistoryRequests).toHaveLength(1);
+  expect(olderHistoryRequests[0].searchParams.get("channel")).toBe("Medical");
+  await expect(page.locator(".toast-danger")).toHaveCount(0);
+  expect(pageErrors).toEqual([]);
+});
+
+test("compact icon controls expose plain-language tooltips", async ({ page }) => {
+  await signIn(page, { width: 1280, height: 720 });
+  const missingTopbarTooltips = await page
+    .locator(".topbar-actions button:visible")
+    .evaluateAll((buttons) =>
+      buttons
+        .filter((button) => button.querySelector(".button-icon"))
+        .filter((button) => !(button.title || "").trim())
+        .map((button) => button.id || button.getAttribute("aria-label")),
+    );
+  expect(missingTopbarTooltips).toEqual([]);
+
+  const missingFeedTooltips = await page
+    .locator(".channel-column:visible .col-actions button")
+    .evaluateAll((buttons) =>
+      buttons
+        .filter((button) => !(button.title || "").trim())
+        .map((button) => button.getAttribute("aria-label") || button.textContent),
+    );
+  expect(missingFeedTooltips).toEqual([]);
+});
+
+test("model readiness, radio terms, and transcript comparison are operator-visible", async ({
+  page,
+}) => {
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await signIn(page);
+
+  await page.getByRole("button", { name: "Show dashboard controls" }).click();
+  const qualityCard = page.locator("#quality-control-card");
+  await expect(qualityCard).toBeVisible();
+  await expect(qualityCard.locator(".model-readiness-row")).toHaveCount(2);
+  await expect(page.locator("#quality-queue-summary")).toContainText("primary");
+
+  await page.locator("#glossary-channel").selectOption("Medical");
+  await page.locator("#glossary-terms").fill("Alpha One\nNorth Gate");
+  await page.getByRole("button", { name: "Save terms" }).click();
+  await expect(page.locator("#glossary-save-status")).toContainText("Version");
+
+  const recoveryCard = page.locator("#recovery-control-card");
+  await expect(recoveryCard).toBeVisible();
+  await page.getByRole("button", { name: "Create verified backup" }).click();
+  await expect(page.locator("#backup-status")).toContainText("verified");
+  await page.getByRole("button", { name: "Run restore drill" }).click();
+  await expect(page.locator("#backup-status")).toContainText("Restore drill passed");
+
+  const retryId = await page.evaluate(async () => {
+    const response = await fetch("/api/history?include_suspect=true&limit=100");
+    const rows = await response.json();
+    return rows.find((row) => row.retry_status === "selected")?.id;
+  });
+  expect(retryId).toBeTruthy();
+  await page.evaluate((id) => window.phaseTwoOpenDrawer(id), retryId);
+  await expect(page.locator("#drawer-comparison-section")).toBeVisible();
+  await expect(page.locator("#drawer-retry-transcript")).toContainText("Large V3");
+  await page.getByRole("button", { name: "Use Medium result" }).click();
+  await expect(page.locator("#drawer-selection-reason")).toContainText(
+    "selected manually",
+  );
+  expect(pageErrors).toEqual([]);
+});
+
 test("archive search and overlay controls work with populated data", async ({
   page,
 }) => {
@@ -205,6 +321,69 @@ test("alert inbox acknowledges events, tests rules, and stays contained on mobil
     )
     .toEqual({ viewport: 390, document: 390 });
   await expect(page.locator(".alert-item").first()).toBeVisible();
+});
+
+test("incident workspace coordinates transmissions, tasks, handoff, and health", async ({
+  page,
+}) => {
+  await signIn(page);
+
+  await page.getByRole("button", { name: "Incident workspace" }).click();
+  const workspace = page.locator("#incident-workspace-view");
+  await expect(workspace).toBeVisible();
+  await page.getByRole("button", { name: "New incident" }).click();
+  const editor = page.locator("#incident-editor-dialog");
+  await editor.getByLabel("Title").fill("Browser north gate response");
+  await editor.getByLabel("Severity").selectOption("urgent");
+  await editor.getByLabel("Status").selectOption("active");
+  await editor.getByLabel("Location").fill("North gate");
+  await editor
+    .getByLabel("Summary")
+    .fill("Coordinate the responding team and retain the radio timeline.");
+  await editor.getByRole("button", { name: "Save incident" }).click();
+
+  await expect(
+    page.locator(".incident-list-item", { hasText: "Browser north gate response" }),
+  ).toBeVisible();
+  await expect(page.locator("#incident-detail")).toContainText(
+    "Browser north gate response",
+  );
+  await page.getByPlaceholder("Add a follow-up task").fill("Confirm gate access");
+  await page.getByRole("button", { name: "Add task" }).click();
+  await expect(page.locator(".incident-task")).toContainText("Confirm gate access");
+
+  await page.getByRole("button", { name: "Back to live board" }).click();
+  const card = page.locator(".message-card").first();
+  await card.locator(".transcript-content").click();
+  await page.getByRole("button", { name: "Add to incident" }).click();
+  const picker = page.locator("#incident-link-dialog");
+  await expect(picker).toBeVisible();
+  await picker
+    .getByRole("button", { name: /Browser north gate response/ })
+    .click();
+  await expect(picker).toBeHidden();
+  await page.locator("#drawer-close-button").click();
+
+  await page.getByRole("button", { name: "Incident workspace" }).click();
+  await page
+    .locator(".incident-list-item", { hasText: "Browser north gate response" })
+    .click();
+  await expect(page.locator(".incident-transcript")).toHaveCount(1);
+
+  await page.getByRole("button", { name: "Shift handoff" }).click();
+  const handoff = page.locator("#shift-handoff-dialog");
+  await expect(handoff).toBeVisible();
+  await expect(handoff).toContainText("Browser north gate response");
+  await handoff.getByRole("button", { name: "Close shift handoff" }).click();
+
+  await page.getByRole("button", { name: "Back to live board" }).click();
+  await page.locator('[data-health-component="source"]').click();
+  const health = page.locator("#health-center-view");
+  await expect(health).toBeVisible();
+  await expect(page.locator(".health-component")).toHaveCount(5);
+  await expect(page.locator('[data-health-card="source"]')).toContainText(
+    "Safe recovery",
+  );
 });
 
 test("feed geometry is collision-free at every supported breakpoint", async ({
