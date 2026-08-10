@@ -1023,15 +1023,40 @@ def build_health_center():
         transcription_summary = "Transcription worker is ready"
 
     pending_delivery = int(transcript_stats["pending"] or 0)
-    if pending_delivery >= 20:
+    # Delivery runs inside the transcription worker, so pausing transcription
+    # also stops it. Anything already finished then waits by design rather than
+    # because the dashboard server is unwell.
+    if pending_delivery and not transcription_enabled:
+        delivery_status = "paused"
+        delivery_summary = (
+            "Delivery is paused with transcription; finished transcripts are "
+            "saved and resume delivery when transcription restarts"
+        )
+        delivery_action = (
+            "Start transcription when you are ready; no transcripts are lost "
+            "while it is paused."
+        )
+    elif pending_delivery >= 20:
         delivery_status = "critical"
         delivery_summary = "Dashboard delivery has a significant backlog"
+        delivery_action = (
+            "Verify the dashboard server, then allow durable delivery retries "
+            "to catch up."
+        )
     elif pending_delivery:
         delivery_status = "caution"
         delivery_summary = "Some transcripts are waiting for delivery"
+        delivery_action = (
+            "Verify the dashboard server, then allow durable delivery retries "
+            "to catch up."
+        )
     else:
         delivery_status = "healthy"
         delivery_summary = "Dashboard delivery is caught up"
+        delivery_action = (
+            "Verify the dashboard server, then allow durable delivery retries "
+            "to catch up."
+        )
 
     try:
         disk = shutil.disk_usage(AUDIO_DIR)
@@ -1122,7 +1147,7 @@ def build_health_center():
             "heartbeat_age_seconds": (worker_heartbeat or {}).get("age_seconds"),
             "queue_depth": pending_delivery,
             "last_error": str(transcript_stats["delivery_error"] or "")[:500],
-            "action": "Verify the dashboard server, then allow durable delivery retries to catch up.",
+            "action": delivery_action,
             "console_service": "server",
             "metrics": {"oldest_waiting_at": transcript_stats["oldest_pending"]},
         },

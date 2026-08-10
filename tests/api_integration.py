@@ -1471,6 +1471,48 @@ class ApiIntegrationTests(unittest.TestCase):
                 ["source", "sync", "transcription", "delivery", "storage"],
             )
 
+            # Delivery runs inside the transcription worker, so pausing
+            # transcription strands anything already finished. That must read as
+            # a deliberate pause rather than sending an operator to troubleshoot
+            # a dashboard server that is working fine.
+            from backend.config import load_settings, save_settings
+            from backend.database import connect as db_connect
+
+            with db_connect() as connection:
+                connection.execute(
+                    """
+                    UPDATE transcripts SET broadcast_pending = 1
+                    WHERE id = (SELECT max(id) FROM transcripts WHERE status = 'ready')
+                    """
+                )
+                connection.commit()
+            previous = load_settings().get("transcription_enabled", True)
+            save_settings({"transcription_enabled": False})
+            try:
+                paused = [
+                    item
+                    for item in self.client.get("/api/health-center").json()["components"]
+                    if item["id"] == "delivery"
+                ][0]
+                self.assertEqual(paused["status"], "paused")
+                self.assertGreaterEqual(paused["queue_depth"], 1)
+                self.assertNotIn("Verify the dashboard server", paused["action"])
+                self.assertIn("transcription", paused["summary"].lower())
+
+                save_settings({"transcription_enabled": True})
+                running = [
+                    item
+                    for item in self.client.get("/api/health-center").json()["components"]
+                    if item["id"] == "delivery"
+                ][0]
+                self.assertEqual(running["status"], "caution")
+                self.assertIn("Verify the dashboard server", running["action"])
+            finally:
+                save_settings({"transcription_enabled": previous})
+                with db_connect() as connection:
+                    connection.execute("UPDATE transcripts SET broadcast_pending = 0")
+                    connection.commit()
+
             diagnostics = self.client.get("/api/diagnostics.zip")
             self.assertEqual(diagnostics.status_code, 200)
             with zipfile.ZipFile(io.BytesIO(diagnostics.content)) as archive:
