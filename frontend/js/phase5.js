@@ -588,7 +588,25 @@ function phaseFiveHealthValue(component) {
     return `${phaseFiveBytes(component.metrics.free_bytes)} free`;
   }
   if (component.queue_depth !== null && component.queue_depth !== undefined) {
-    return `${component.queue_depth} queued`;
+    return `${component.queue_depth.toLocaleString()} queued`;
+  }
+  return component.status;
+}
+
+/**
+ * Short form for the top command bar chips, which have only a few characters of
+ * room each. Queue depths reach five or six digits on a real backlog, so they
+ * are compacted the same way the backlog metric is; the chip tooltip keeps the
+ * exact figure.
+ */
+function phaseFiveHealthChipValue(component) {
+  if (component.id === "storage") {
+    return phaseFiveBytes(component.metrics.free_bytes);
+  }
+  if (component.queue_depth !== null && component.queue_depth !== undefined) {
+    return new Intl.NumberFormat([], { notation: "compact" }).format(
+      Number(component.queue_depth) || 0,
+    );
   }
   return component.status;
 }
@@ -651,8 +669,13 @@ async function phaseFiveLoadHealth() {
     const chip = document.querySelector(`[data-health-component="${component.id}"]`);
     if (!chip) return;
     chip.className = `health-chip health-${component.status}`;
-    chip.querySelector("span").textContent = phaseFiveHealthValue(component);
-    chip.title = component.summary;
+    chip.querySelector("span").textContent = phaseFiveHealthChipValue(component);
+    const exactValue = phaseFiveHealthValue(component);
+    chip.title = `${component.label} · ${exactValue} — ${component.summary}`;
+    chip.setAttribute(
+      "aria-label",
+      `${component.label}: ${exactValue}. ${component.summary}`,
+    );
   });
 }
 

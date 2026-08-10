@@ -142,6 +142,11 @@ def build_search_filters(
             clauses.append(f"substr({effective_time}, 1, 10) {operator} ?")
             parameters.append(value)
             normalized[name] = value
+    # Times are compared as text against substr(...) HH:MM, so an unchecked
+    # value silently matches nothing instead of reporting a bad filter.
+    for value, name in ((start_time, "start_time"), (end_time, "end_time")):
+        if value and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", value):
+            raise ValueError(f"invalid {name.replace('_', ' ')}")
     if start_time and end_time and start_time > end_time:
         clauses.append(
             f"(substr({effective_time}, 12, 5) >= ? OR "

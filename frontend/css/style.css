@@ -2488,7 +2488,10 @@ body.compact-mode .custom-audio-player {
   display: grid;
   gap: 4px;
   grid-column: 1 / -1;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  /* Content-sized tracks: "Transcription 21K" needs far more room than
+     "Sync 0", and equal fifths clipped every value to a few pixels.
+     minmax(0, auto) still allows ellipsis if a value grows beyond the row. */
+  grid-template-columns: repeat(5, minmax(0, auto));
 }
 
 .health-chips button {

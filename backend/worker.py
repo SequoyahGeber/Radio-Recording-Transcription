@@ -157,8 +157,11 @@ def voice_activity_segments(audio):
             grouped_regions[-1]["end"] = region["end"]
         else:
             grouped_regions.append(dict(region))
+    # Each chunk carries where it began in the original recording. Whisper times
+    # its segments from the start of whatever audio it is handed, so without the
+    # offset every chunk after the first would report timestamps near zero.
     return [
-        audio[region["start"] : region["end"]]
+        (audio[region["start"] : region["end"]], region["start"] / 16000)
         for region in grouped_regions
         if region["end"] - region["start"] >= int(0.2 * 16000)
     ]
@@ -191,8 +194,10 @@ def transcribe_audio(
         speech_segments = voice_activity_segments(audio)
         if not speech_segments:
             return "", duration, {"no_speech_prob": 1.0}
-        results = [
-            mlx_whisper.transcribe(
+        results = []
+        decoded_segments = []
+        for speech_audio, offset_seconds in speech_segments:
+            result = mlx_whisper.transcribe(
                 speech_audio,
                 path_or_hf_repo=requested_model,
                 language=language,
@@ -206,13 +211,14 @@ def transcribe_audio(
                 hallucination_silence_threshold=1.5,
                 verbose=False,
             )
-            for speech_audio in speech_segments
-        ]
-        decoded_segments = [
-            segment
-            for result in results
-            for segment in (result.get("segments") or [])
-        ]
+            results.append(result)
+            for segment in result.get("segments") or []:
+                # Shift back onto the recording's own timeline so segment
+                # seeking lands on the audio the operator is reading.
+                located = dict(segment)
+                located["start"] = float(segment.get("start") or 0) + offset_seconds
+                located["end"] = float(segment.get("end") or 0) + offset_seconds
+                decoded_segments.append(located)
         metrics = {}
         compression_values = [
             segment.get("compression_ratio")
@@ -945,39 +951,41 @@ def durable_job_dispatcher():
             print(f"[QUEUE] Durable job dispatcher failed: {exc}")
         time.sleep(1)
 
-queue_existing_unprocessed_files()
-queue_existing_quality_retries()
+def run_service():
+    """Start the queue workers, the folder watcher, and block until interrupted."""
+    queue_existing_unprocessed_files()
+    queue_existing_quality_retries()
 
-worker_threads = []
-for _ in range(MAX_WORKERS):
-    worker_thread = Thread(target=transcription_worker, daemon=True)
-    worker_thread.start()
-    worker_threads.append(worker_thread)
+    for _ in range(MAX_WORKERS):
+        Thread(target=transcription_worker, daemon=True).start()
 
-reconciliation_thread = Thread(target=periodic_reconciliation, daemon=True)
-reconciliation_thread.start()
+    for background in (
+        periodic_reconciliation,
+        durable_job_dispatcher,
+        deliver_pending_transcripts,
+        heartbeat_worker,
+    ):
+        Thread(target=background, daemon=True).start()
 
-job_dispatch_thread = Thread(target=durable_job_dispatcher, daemon=True)
-job_dispatch_thread.start()
+    event_handler = AudioFileHandler()
+    observer = Observer()
+    observer.schedule(event_handler, FOLDER_TO_WATCH, recursive=True)
+    observer.start()
 
-delivery_thread = Thread(target=deliver_pending_transcripts, daemon=True)
-delivery_thread.start()
+    print(f"WATCHDOG ONLINE: Monitoring '{FOLDER_TO_WATCH}' and all subfolders.")
+    print("Press Ctrl+C to stop the system.\n")
 
-heartbeat_thread = Thread(target=heartbeat_worker, daemon=True)
-heartbeat_thread.start()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nShutting down Watchdog...")
+        observer.stop()
+    observer.join()
 
-event_handler = AudioFileHandler()
-observer = Observer()
-observer.schedule(event_handler, FOLDER_TO_WATCH, recursive=True)
-observer.start()
 
-print(f"WATCHDOG ONLINE: Monitoring '{FOLDER_TO_WATCH}' and all subfolders.")
-print("Press Ctrl+C to stop the system.\n")
-
-try:
-    while True:
-        time.sleep(1)
-except KeyboardInterrupt:
-    print("\nShutting down Watchdog...")
-    observer.stop()
-observer.join()
+# Importing this module must not start the service; the supervisor runs it with
+# `python -m backend.worker`. Without this guard the module blocks forever on
+# import, which is why none of its transcription logic could be tested.
+if __name__ == "__main__":
+    run_service()

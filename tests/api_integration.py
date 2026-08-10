@@ -503,6 +503,28 @@ class ApiIntegrationTests(unittest.TestCase):
                 400,
             )
 
+            # A malformed time window must be reported, not silently applied as
+            # a text comparison that quietly matches nothing.
+            for parameter, value in (
+                ("start", "NOTATIME"),
+                ("start", "24:00"),
+                ("start", "12:60"),
+                ("start", "5"),
+                ("end", "zz"),
+            ):
+                rejected = self.client.get(
+                    "/api/search",
+                    params={"q": "medical", parameter: value},
+                )
+                self.assertEqual(rejected.status_code, 400, f"{parameter}={value}")
+                self.assertIn("time", rejected.json()["detail"])
+            for parameter, value in (("start", "00:00"), ("end", "23:59")):
+                accepted = self.client.get(
+                    "/api/search",
+                    params={"q": "medical", parameter: value},
+                )
+                self.assertEqual(accepted.status_code, 200, f"{parameter}={value}")
+
             target = filtered.json()["items"][0]
             note_update = self.client.patch(
                 f"/api/transcripts/{target['id']}",

@@ -133,6 +133,47 @@ test("compact icon controls expose plain-language tooltips", async ({ page }) =>
   expect(missingFeedTooltips).toEqual([]);
 });
 
+test("health chips show their values instead of clipping them", async ({ page }) => {
+  await signIn(page);
+
+  const chips = await page.locator("#health-chips button").evaluateAll((buttons) =>
+    buttons.map((button) => {
+      const value = button.querySelector("span");
+      return {
+        id: button.dataset.healthComponent,
+        value: value.textContent.trim(),
+        clipped: value.scrollWidth > value.clientWidth + 1,
+        title: (button.title || "").trim(),
+      };
+    }),
+  );
+
+  expect(chips).toHaveLength(5);
+  expect(chips.filter((chip) => chip.clipped)).toEqual([]);
+  // Every chip resolves to a real reading and keeps the exact figure on hover.
+  expect(chips.filter((chip) => !chip.value || chip.value === "—")).toEqual([]);
+  expect(chips.filter((chip) => !chip.title)).toEqual([]);
+
+  // A six-figure backlog must still fit the single-row command bar.
+  const underLoad = await page.evaluate(() => {
+    const format = new Intl.NumberFormat([], { notation: "compact" });
+    document.querySelector('[data-health-component="transcription"] span').textContent =
+      format.format(1234567);
+    const buttons = [...document.querySelectorAll("#health-chips button")];
+    return {
+      clipped: buttons
+        .map((button) => button.querySelector("span"))
+        .filter((value) => value.scrollWidth > value.clientWidth + 1).length,
+      rowWidth: document.querySelector("#health-chips").getBoundingClientRect().width,
+      chipWidth: buttons.reduce((total, b) => total + b.getBoundingClientRect().width, 0),
+      topbarHeight: document.querySelector("#topbar").getBoundingClientRect().height,
+    };
+  });
+  expect(underLoad.clipped).toBe(0);
+  expect(underLoad.chipWidth).toBeLessThanOrEqual(underLoad.rowWidth);
+  expect(underLoad.topbarHeight).toBeLessThanOrEqual(96);
+});
+
 test("model readiness, radio terms, and transcript comparison are operator-visible", async ({
   page,
 }) => {

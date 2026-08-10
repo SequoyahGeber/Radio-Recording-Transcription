@@ -1670,8 +1670,16 @@ async function refreshSystemStats() {
     document.getElementById("active-operators").innerText =
       `${stats.active_clients} operator${stats.active_clients === 1 ? "" : "s"}`;
     const engineLabel = stats.engine === "mlx" ? "MLX / Apple GPU" : "CPU fallback";
-    document.getElementById("engine-status").innerText =
-      `${stats.model[0].toUpperCase()}${stats.model.slice(1)} + selective Large V3 rescue · ${engineLabel} · ${formatMetric(stats.processed)} complete · ${formatMetric(stats.suspect)} suspect`;
+    const modelName = String(stats.model || "");
+    const modelLabel = modelName
+      ? `${modelName[0].toUpperCase()}${modelName.slice(1)}`
+      : "Unknown model";
+    const engineSummary = `${modelLabel} + selective Large V3 rescue · ${engineLabel} · ${formatMetric(stats.processed)} complete · ${formatMetric(stats.suspect)} suspect`;
+    const engineStatus = document.getElementById("engine-status");
+    engineStatus.innerText = engineSummary;
+    // The command bar is too narrow for this line, so it renders ellipsised.
+    // Keep the full sentence reachable on hover and for assistive technology.
+    engineStatus.title = engineSummary;
     const serviceStatus = document.getElementById("service-status");
     const unavailable = Object.entries(stats.services || {})
       .filter(
