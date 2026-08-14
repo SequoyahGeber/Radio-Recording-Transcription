@@ -35,6 +35,7 @@
           </select>
           <label class="checkbox-label"><span><input id="setup-transcription-enabled" type="checkbox" checked /> Enable transcription after setup</span></label>
           <div id="setup-source-result" class="setup-check-result" role="status"></div>
+          <button class="btn btn-quiet setup-back" type="button" data-setup-back="1">Back</button>
           <button id="setup-source-next" class="btn btn-primary login-submit" type="button">Validate and continue</button>
         </section>
 
@@ -42,6 +43,7 @@
           <h2>Medium transcription model</h2>
           <p id="setup-model-status">Checking the installed model…</p>
           <progress id="setup-model-progress" max="1" hidden></progress>
+          <button class="btn btn-quiet setup-back" type="button" data-setup-back="2">Back</button>
           <button id="setup-model-download" class="btn btn-primary login-submit" type="button">Download Medium model</button>
           <button id="setup-model-next" class="btn login-submit" type="button" disabled>Continue</button>
           <p class="setup-hint">A failed download never locks you out; partial files resume when you retry.</p>
@@ -92,6 +94,7 @@
             required
           />
 
+          <button class="btn btn-quiet setup-back" type="button" data-setup-back="3">Back</button>
           <button class="btn btn-primary login-submit" type="submit">
             Create administrator and continue
           </button>
@@ -101,8 +104,10 @@
         <section class="setup-step" data-step="5" hidden>
           <h2>Recovery and final readiness</h2>
           <div id="setup-final-checks" class="setup-final-checks"></div>
+          <p id="setup-final-summary" class="setup-hint" role="status"></p>
           <button id="setup-backup-button" class="btn login-submit" type="button">Create and verify first backup</button>
           <button id="setup-notification-button" class="btn login-submit" type="button">Test notification permission</button>
+          <p id="setup-notification-status" class="setup-hint" role="status"></p>
           <button id="setup-finish-button" class="btn btn-primary login-submit" type="button">Open Radio Command Center</button>
         </section>
         <div class="login-security-note">

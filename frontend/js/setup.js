@@ -66,15 +66,43 @@ async function refreshModel() {
 }
 
 function renderFinalChecks() {
+  const medium = setupState.status?.models?.find(
+    (model) => model.model_key === "medium",
+  );
+  const transcriptionWanted = document.getElementById(
+    "setup-transcription-enabled",
+  ).checked;
+  // This line used to be hardcoded to true, so the summary claimed the model
+  // was ready even when the download had failed or never been started.
+  const modelSettled = Boolean(medium?.ready) || !transcriptionWanted;
   const checks = [
     ["Recording source validated", Boolean(setupState.status?.source?.readable)],
-    ["Medium model ready or transcription deferred", true],
+    [
+      transcriptionWanted
+        ? "Medium model installed"
+        : "Transcription deferred — no model needed yet",
+      modelSettled,
+    ],
     ["Administrator secured", setupState.administratorCreated],
     ["Recovery backup verified", setupState.backupReady],
   ];
   document.getElementById("setup-final-checks").innerHTML = checks
-    .map(([label, ready]) => `<div>${ready ? "✓" : "○"} ${label}</div>`)
+    .map(
+      ([label, ready]) =>
+        `<div>${ready ? "✓" : "○"} ${escapeSetupText(label)}</div>`,
+    )
     .join("");
+  const outstanding = checks.filter(([, ready]) => !ready).length;
+  document.getElementById("setup-final-summary").textContent = outstanding
+    ? `${outstanding} item${outstanding === 1 ? "" : "s"} still outstanding. You can ` +
+      "open the dashboard now and finish them from Settings."
+    : "Everything is ready.";
+}
+
+function escapeSetupText(value) {
+  const holder = document.createElement("div");
+  holder.textContent = value;
+  return holder.innerHTML;
 }
 
 document.getElementById("setup-welcome-next").addEventListener("click", async () => {
@@ -165,11 +193,39 @@ document.getElementById("setup-backup-button").addEventListener("click", async (
   }
 });
 
-document.getElementById("setup-notification-button").addEventListener("click", async () => {
-  if (!("Notification" in window)) return;
-  const permission = await Notification.requestPermission();
-  if (permission === "granted") new Notification("Radio Command Center is ready", { body: "Operational notifications are enabled." });
+// Every step except the first can be reconsidered without restarting setup.
+document.querySelectorAll("[data-setup-back]").forEach((button) => {
+  button.addEventListener("click", () =>
+    showStep(Number(button.dataset.setupBack)),
+  );
 });
+
+document
+  .getElementById("setup-notification-button")
+  .addEventListener("click", async (event) => {
+    const status = document.getElementById("setup-notification-status");
+    if (!("Notification" in window)) {
+      status.textContent = "This browser does not support notifications.";
+      return;
+    }
+    event.target.disabled = true;
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission === "granted") {
+        new Notification("Radio Command Center is ready", {
+          body: "Operational notifications are enabled.",
+        });
+        status.textContent = "Notifications are allowed.";
+      } else if (permission === "denied") {
+        status.textContent =
+          "Notifications are blocked. Allow them for this site in your browser settings.";
+      } else {
+        status.textContent = "No choice was made — alerts stay in the dashboard.";
+      }
+    } finally {
+      event.target.disabled = false;
+    }
+  });
 document.getElementById("setup-finish-button").addEventListener("click", () => window.location.replace("/"));
 
 showStep(1);
