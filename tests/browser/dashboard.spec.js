@@ -722,6 +722,19 @@ test("settings screen edits real values and reports what needs a restart", async
   await expect(settings.getByText("Archive database")).toBeVisible();
   await expect(settings.getByText("Recordings stored in")).toBeVisible();
 
+  // The rejected edit is still pending, so closing has to ask before dropping it.
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await page.locator("#settings-close").click();
+  await expect(settings).toBeVisible();
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.locator("#settings-close").click();
+  await expect(settings).toBeHidden();
+
+  // Nothing was saved by the refused edit.
+  await page.locator("#settings-button").click();
+  await settings.getByRole("button", { name: "Storage and history", exact: true }).click();
+  await expect(settings.locator("#setting-backup_retention_count")).toHaveValue("10");
   await page.locator("#settings-close").click();
   await expect(settings).toBeHidden();
 });
