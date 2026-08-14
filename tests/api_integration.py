@@ -28,7 +28,8 @@ os.environ["RADIO_HOST"] = "127.0.0.1"
 from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
-from backend.config import LOG_DIR, load_settings, save_settings
+from backend.backups import apply_pending_restore, pending_restore, request_restore
+from backend.config import DB_NAME, LOG_DIR, load_settings, save_settings
 from backend.database import connect
 from backend.maintenance import prune_history
 from backend.security import (
@@ -1883,6 +1884,87 @@ class SettingsApiTests(unittest.TestCase):
             viewer.put("/api/settings", json={"values": {"port": 9000}}).status_code,
             403,
         )
+
+
+class BackupRestoreTests(unittest.TestCase):
+    """A backup is only useful if it can be put back."""
+
+    def setUp(self):
+        self.client = TestClient(app, base_url="https://127.0.0.1")
+        self.assertEqual(
+            self.client.post(
+                "/api/login",
+                json={"username": "admin", "password": "admin-password"},
+            ).status_code,
+            200,
+        )
+
+    def test_a_queued_restore_replaces_the_archive_and_keeps_the_old_one(self):
+        marker = f"restore-marker-{secrets.token_hex(4)}"
+        with connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO transcripts(
+                    timestamp, recorded_at, filename, transcript_text,
+                    raw_transcript_text, quality_score, quality_reason, status
+                ) VALUES ('2026-08-01T10:00:00', '2026-08-01T09:59:00', ?, ?, ?,
+                          1.0, '', 'ready')
+                """,
+                (f"Restore/{marker}.mp3", marker, marker),
+            )
+            connection.commit()
+
+        backup = self.client.post("/api/backups").json()
+
+        # Something happens after the backup that the operator wants undone.
+        with connect() as connection:
+            connection.execute(
+                "DELETE FROM transcripts WHERE filename = ?", (f"Restore/{marker}.mp3",)
+            )
+            connection.commit()
+        with connect(read_only=True) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT count(*) FROM transcripts WHERE filename = ?",
+                    (f"Restore/{marker}.mp3",),
+                ).fetchone()[0],
+                0,
+            )
+
+        request_restore(backup["id"], "admin")
+        self.assertIsNotNone(pending_restore())
+        result = apply_pending_restore(log=lambda message: None)
+
+        self.assertEqual(result["status"], "restored")
+        self.assertTrue(os.path.isfile(result["previous_database"]))
+        self.assertIsNone(pending_restore(), "the request must not run twice")
+        with connect(read_only=True) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT transcript_text FROM transcripts WHERE filename = ?",
+                    (f"Restore/{marker}.mp3",),
+                ).fetchone()[0],
+                marker,
+            )
+
+    def test_a_corrupted_backup_is_refused_and_the_archive_is_untouched(self):
+        backup = self.client.post("/api/backups").json()
+        request_restore(backup["id"], "admin")
+        queued = pending_restore()
+        with open(
+            os.path.join(queued["backup_path"], "radio-command-center.db"), "r+b"
+        ) as handle:
+            handle.seek(0)
+            handle.write(b"corrupted-header")
+
+        before = os.path.getsize(DB_NAME)
+        result = apply_pending_restore(log=lambda message: None)
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("checksum", result["error"].lower())
+        self.assertEqual(os.path.getsize(DB_NAME), before)
+        # A failing restore clears itself instead of trapping every startup.
+        self.assertIsNone(pending_restore())
 
 
 class MaintenanceTests(unittest.TestCase):

@@ -87,8 +87,18 @@ function phaseSevenRenderBackups(backups) {
     verify.type = "button";
     verify.className = "btn btn-quiet";
     verify.textContent = "Verify";
+    verify.title = "Check this backup still matches its checksum";
     verify.addEventListener("click", () => phaseSevenVerifyBackup(backup.id, verify));
-    row.append(summary, verify);
+    const restore = document.createElement("button");
+    restore.type = "button";
+    restore.className = "btn btn-quiet";
+    restore.textContent = "Restore";
+    restore.title = "Replace the live archive with this backup";
+    restore.addEventListener("click", () => phaseSevenRestoreBackup(backup, restore));
+    const actions = document.createElement("div");
+    actions.className = "backup-actions";
+    actions.append(verify, restore);
+    row.append(summary, actions);
     list.appendChild(row);
   }
 }
@@ -110,6 +120,34 @@ async function phaseSevenVerifyBackup(backupId, button) {
     status.textContent = error.message;
     showToast(error.message, "danger");
   } finally {
+    button.disabled = false;
+  }
+}
+
+async function phaseSevenRestoreBackup(backup, button) {
+  const when = new Date(backup.created_at);
+  const label = Number.isNaN(when.getTime())
+    ? backup.created_at
+    : when.toLocaleString();
+  const confirmed = window.confirm(
+    `Replace the live archive with the backup from ${label}?\n\n` +
+      `${Number(backup.transcript_count || 0).toLocaleString()} transcripts will ` +
+      "replace what is in the dashboard now. The services restart to do it, and " +
+      "the archive being replaced is kept on disk so this can be undone.",
+  );
+  if (!confirmed) return;
+  button.disabled = true;
+  const status = document.getElementById("backup-status");
+  status.textContent = "Queueing the restore…";
+  try {
+    const result = await phaseSevenJson(`/api/backups/${backup.id}/restore`, {
+      method: "POST",
+    });
+    status.textContent = result.detail;
+    showToast("Restoring from backup — services are restarting.", "success");
+  } catch (error) {
+    status.textContent = error.message;
+    showToast(error.message, "danger");
     button.disabled = false;
   }
 }

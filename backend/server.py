@@ -43,6 +43,7 @@ from backend.analytics import list_profiles, quality_analytics, save_profile
 from backend.backups import (
     create_backup,
     list_backups,
+    request_restore,
     restore_drill,
     verify_backup,
 )
@@ -2095,6 +2096,33 @@ def check_backup(backup_id: int, request: Request):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     audit(session["u"], "verify_backup", details={"backup_id": backup_id})
     return backup
+
+
+@app.post("/api/backups/{backup_id}/restore")
+def restore_from_backup(backup_id: int, request: Request):
+    session = require_role(request, "admin")
+    try:
+        queued = request_restore(backup_id, session["u"])
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    audit(session["u"], "restore_backup", details={"backup_id": backup_id})
+    try:
+        schedule_service_restart()
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"The restore is queued but the services could not restart: {exc}",
+        ) from exc
+    return {
+        "status": "restoring",
+        "backup_id": queued["backup_id"],
+        "detail": (
+            "The services are restarting and will restore this backup before "
+            "reopening the archive. The archive being replaced is kept alongside it."
+        ),
+    }
 
 
 @app.post("/api/backups/{backup_id}/restore-drill")

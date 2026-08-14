@@ -6,7 +6,13 @@ import sqlite3
 import tempfile
 from datetime import datetime
 
-from backend.config import DATA_DIR, DB_NAME, SECURITY_CONFIG_PATH, SETTINGS_PATH
+from backend.config import (
+    DATA_DIR,
+    DB_NAME,
+    RUNTIME_DIR,
+    SECURITY_CONFIG_PATH,
+    SETTINGS_PATH,
+)
 from backend.database import connect
 
 
@@ -148,6 +154,94 @@ def verify_backup(backup_id):
     if error:
         raise RuntimeError(error)
     return next(item for item in list_backups() if item["id"] == int(backup_id))
+
+
+RESTORE_REQUEST_PATH = os.path.join(RUNTIME_DIR, "restore-request.json")
+
+
+def request_restore(backup_id, username="system"):
+    """Queue a backup to be restored the next time the services start.
+
+    The archive cannot be swapped underneath a running dashboard and worker, so
+    the request is recorded here and carried out by the supervisor before it
+    launches anything. The backup is verified first, so a request is never
+    queued against a file that cannot be read.
+    """
+    verify_backup(backup_id)
+    path, checksum = _backup_path(backup_id)
+    os.makedirs(RUNTIME_DIR, exist_ok=True)
+    request = {
+        "backup_id": int(backup_id),
+        "backup_path": path,
+        "sha256": checksum,
+        "requested_by": username,
+        "requested_at": datetime.now().isoformat(),
+    }
+    temporary_path = f"{RESTORE_REQUEST_PATH}.tmp"
+    with open(temporary_path, "w", encoding="utf-8") as handle:
+        json.dump(request, handle, indent=2, sort_keys=True)
+    os.replace(temporary_path, RESTORE_REQUEST_PATH)
+    os.chmod(RESTORE_REQUEST_PATH, 0o600)
+    return request
+
+
+def pending_restore():
+    try:
+        with open(RESTORE_REQUEST_PATH, "r", encoding="utf-8") as handle:
+            request = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return request if isinstance(request, dict) else None
+
+
+def apply_pending_restore(log=print):
+    """Carry out a queued restore. Safe to call when none is queued.
+
+    The database in place is copied aside before anything replaces it, so a
+    restore can itself be undone. The request file is removed whatever happens,
+    so a failing restore cannot trap the services in a loop.
+    """
+    request = pending_restore()
+    if not request:
+        return None
+
+    result = {"backup_id": request.get("backup_id"), "status": "failed", "error": ""}
+    try:
+        source = os.path.join(request["backup_path"], "radio-command-center.db")
+        if _sha256(source) != request.get("sha256"):
+            raise RuntimeError("The backup no longer matches its recorded checksum")
+        with sqlite3.connect(f"file:{source}?mode=ro", uri=True) as check:
+            integrity = check.execute("PRAGMA quick_check").fetchone()[0]
+        if integrity != "ok":
+            raise RuntimeError(f"The backup failed its integrity check: {integrity}")
+
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        if os.path.isfile(DB_NAME):
+            replaced = f"{DB_NAME}.replaced-{stamp}"
+            shutil.copy2(DB_NAME, replaced)
+            result["previous_database"] = replaced
+            log(f"[RESTORE] Kept the previous archive at {replaced}")
+
+        shutil.copy2(source, DB_NAME)
+        # The old write-ahead log belongs to the database that was just
+        # replaced; leaving it in place would corrupt the restored one.
+        for suffix in ("-wal", "-shm"):
+            try:
+                os.unlink(f"{DB_NAME}{suffix}")
+            except OSError:
+                pass
+        os.chmod(DB_NAME, 0o600)
+        result["status"] = "restored"
+        log(f"[RESTORE] Restored backup {request.get('backup_id')} into {DB_NAME}")
+    except Exception as exc:
+        result["error"] = str(exc)
+        log(f"[RESTORE] Restore failed and was abandoned: {exc}")
+    finally:
+        try:
+            os.unlink(RESTORE_REQUEST_PATH)
+        except OSError:
+            pass
+    return result
 
 
 def restore_drill(backup_id):

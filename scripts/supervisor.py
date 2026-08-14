@@ -327,6 +327,20 @@ def main():
         check=True,
     )
 
+    # A queued restore replaces the archive before the dashboard, worker, or
+    # sync can open it. Nothing else in the system is allowed to swap the
+    # database while it is in use.
+    try:
+        from backend.backups import apply_pending_restore
+
+        restore = apply_pending_restore(
+            log=lambda message: print(message, flush=True)
+        )
+        if restore and restore["status"] != "restored":
+            print(f"[RESTORE] Continuing with the existing archive: {restore['error']}")
+    except Exception as exc:
+        print(f"[RESTORE] Restore step skipped: {exc}", flush=True)
+
     # Only values that are not administrator settings are injected here. Engine,
     # model, host, and port all come from settings.json by way of backend.config,
     # so the settings screen can change them instead of an environment variable

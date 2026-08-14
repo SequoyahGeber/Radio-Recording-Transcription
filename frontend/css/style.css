@@ -4846,6 +4846,12 @@ body.player-open #dashboard {
   color: var(--alert-danger);
 }
 
+.backup-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 .backup-row .btn {
   width: auto;
   margin: 0;
