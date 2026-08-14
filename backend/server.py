@@ -78,7 +78,6 @@ from backend.security import (
     APP_KEY_HEADER,
     SESSION_COOKIE,
     app_session,
-    app_sign_in_enabled,
     authenticate_user,
     create_initial_admin,
     create_session_token,

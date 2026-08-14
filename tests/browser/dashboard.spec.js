@@ -721,6 +721,10 @@ test("settings screen edits real values and reports what needs a restart", async
   await settings.getByRole("button", { name: "System", exact: true }).click();
   await expect(settings.getByText("Archive database")).toBeVisible();
   await expect(settings.getByText("Recordings stored in")).toBeVisible();
+  // The archive summary is the only place the multi-year import history shows.
+  await expect(page.locator("#settings-archive-summary")).toHaveText(
+    /176 transcripts across 2024–2026/,
+  );
 
   // The rejected edit is still pending, so closing has to ask before dropping it.
   page.once("dialog", (dialog) => dialog.dismiss());

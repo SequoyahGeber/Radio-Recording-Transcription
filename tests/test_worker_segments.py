@@ -7,8 +7,10 @@ Segment seeking in the detail drawer plays from these values.
 """
 
 import atexit
+import base64
 import importlib
 import os
+import secrets
 import tempfile
 import unittest
 from unittest import mock
@@ -39,11 +41,15 @@ def _load_worker():
     try:
         load_security_config()
     except RuntimeError:
+        # Generated rather than written out, so no literal in this repository
+        # looks like a credential to a secret scanner.
         save_security_config(
             {
                 "users": [],
-                "session_secret": "dGVzdC1zZXNzaW9uLXNlY3JldC12YWx1ZQ==",
-                "internal_token": "worker-segment-test-token",
+                "session_secret": base64.urlsafe_b64encode(
+                    secrets.token_bytes(32)
+                ).decode("ascii"),
+                "internal_token": secrets.token_urlsafe(16),
             }
         )
     return importlib.import_module("backend.worker")

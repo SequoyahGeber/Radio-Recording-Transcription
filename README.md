@@ -135,17 +135,6 @@ until that first profile has been saved, so setup cannot be repeated to replace
 an existing administrator. Administrators can add or update profiles from the
 dashboard control bar. At least one active administrator is always required.
 
-Phase Six adds durable primary and Large V3 rescue queues, background model
-readiness controls, per-channel radio-term glossaries, and supervisor-visible
-Medium/Large V3 comparison with plain-language selection reasons. See
-`docs/phase-six-handoff.md` for its validation evidence and operating details.
-
-Phase Seven adds guided deployment readiness, automatic verified backups,
-restore drills, and adaptive native Mac controls. Phase Eight adds real-audio
-quality analytics, timestamped segment seeking, and evidence-gated channel
-audio profiles. See `docs/phase-seven-eight-handoff.md` for the final acceptance
-evidence.
-
 ## Transcript quality
 
 MLX decoding disables previous-text conditioning and applies repetition,

@@ -222,6 +222,8 @@ function settingsAboutMarkup(document_) {
         .join("")}
     </dl>
     ${components ? `<h4>Services</h4><ul class="settings-service-list">${components}</ul>` : ""}
+    <h4>Archive</h4>
+    <div id="settings-archive-summary" class="settings-note">Reading the archive…</div>
     <div class="settings-inline-actions">
       <button class="btn btn-quiet" type="button" data-settings-action="copy-address">
         Copy dashboard address
@@ -270,8 +272,49 @@ function settingsRender(document_) {
   settingsShowRestart(document_.restart_required || "none");
 }
 
+async function settingsLoadArchiveSummary() {
+  const target = document.getElementById("settings-archive-summary");
+  if (!target) return;
+  try {
+    const archive = await settingsRequest("/api/archive/years");
+    const years = archive.years || [];
+    if (!years.length) {
+      target.textContent = "No transcripts have been recorded yet.";
+      return;
+    }
+    const span =
+      years.length === 1
+        ? years[0].year
+        : `${years[0].year}–${years[years.length - 1].year}`;
+    const perYear = years
+      .map(
+        (entry) =>
+          `${entry.year}: ${Number(entry.transcript_count).toLocaleString()}`,
+      )
+      .join(" · ");
+    // The migration that merges annual archives records what it imported; this
+    // is the only place that history is visible.
+    const imports = (archive.imports || [])
+      .map(
+        (entry) =>
+          `${Number(entry.imported_count).toLocaleString()} of ${Number(
+            entry.source_count,
+          ).toLocaleString()} imported ${new Date(
+            entry.imported_at,
+          ).toLocaleDateString()}`,
+      )
+      .join("; ");
+    target.textContent =
+      `${Number(archive.total).toLocaleString()} transcripts across ${span} (${perYear}).` +
+      (imports ? ` Imported archives: ${imports}.` : "");
+  } catch (error) {
+    target.textContent = error.message;
+  }
+}
+
 function settingsSelectGroup(groupId) {
   settingsState.activeGroup = groupId;
+  if (groupId === "about") settingsLoadArchiveSummary();
   settingsTabs.querySelectorAll("[data-settings-tab]").forEach((tab) => {
     tab.classList.toggle("is-active", tab.dataset.settingsTab === groupId);
   });

@@ -4,7 +4,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from backend.config import DATA_DIR, DB_NAME, SECURITY_CONFIG_PATH, SETTINGS_PATH
 from backend.database import connect
@@ -165,17 +165,3 @@ def restore_drill(backup_id):
         if integrity != "ok":
             raise RuntimeError(f"Restore drill failed: {integrity}")
     return {"status": "passed", "transcript_count": transcripts, "table_count": tables}
-
-
-def create_scheduled_backup_if_due(hours=24):
-    with connect(read_only=True) as connection:
-        row = connection.execute(
-            "SELECT created_at FROM backup_history WHERE status = 'verified' ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-    if row:
-        try:
-            if datetime.fromisoformat(row["created_at"]) > datetime.now() - timedelta(hours=hours):
-                return None
-        except (TypeError, ValueError):
-            pass
-    return create_backup("automatic")
