@@ -653,12 +653,27 @@ def schedule_service_restart(delay_seconds=2):
     )
 
 
-def read_html(filename):
+def describe_session_lifetime():
+    """How long a browser stays signed in, in words an operator can read."""
+    hours = session_lifetime_seconds() // 3600
+    if hours < 48:
+        return f"{hours} hour{'s' if hours != 1 else ''}"
+    days = round(hours / 24)
+    if days < 14:
+        return f"{days} days"
+    weeks = round(days / 7)
+    return f"{days} days" if weeks < 4 else f"{round(days / 30)} month{'s' if days >= 60 else ''}"
+
+
+def read_html(filename, replacements=None):
     path = os.path.join(PROJECT_ROOT, "frontend", filename)
     if not os.path.exists(path):
         return HTMLResponse("<h1>Interface file not found.</h1>", status_code=404)
     with open(path, "r", encoding="utf-8") as handle:
-        return HTMLResponse(handle.read())
+        markup = handle.read()
+    for token, value in (replacements or {}).items():
+        markup = markup.replace(token, value)
+    return HTMLResponse(markup)
 
 
 def read_heartbeats():
@@ -1440,7 +1455,10 @@ async def login_page(request: Request):
         return RedirectResponse("/", status_code=303)
     if setup_required():
         return RedirectResponse("/setup", status_code=303)
-    return read_html("login.html")
+    return read_html(
+        "login.html",
+        {"{{SESSION_LIFETIME}}": describe_session_lifetime()},
+    )
 
 
 @app.get("/setup")

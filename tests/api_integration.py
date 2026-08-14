@@ -1702,6 +1702,18 @@ class NativeAppSignInTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 401)
 
+    def test_the_login_page_states_the_real_session_length(self):
+        save_settings({"session_lifetime_hours": 12})
+        try:
+            page = self.client.get("/login", headers={"Accept": "text/html"})
+            self.assertEqual(page.status_code, 200)
+            self.assertIn("Stays signed in for 12 hours", page.text)
+            self.assertNotIn("{{SESSION_LIFETIME}}", page.text)
+        finally:
+            save_settings({"session_lifetime_hours": 720})
+        page = self.client.get("/login", headers={"Accept": "text/html"})
+        self.assertIn("Stays signed in for 1 month", page.text)
+
     def test_the_app_is_never_shown_the_login_page(self):
         response = self.client.get(
             "/login",
