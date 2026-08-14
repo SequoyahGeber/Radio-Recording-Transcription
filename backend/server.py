@@ -85,6 +85,7 @@ from backend.security import (
     find_user,
     list_users,
     role_allows,
+    rotate_session_secret,
     session_lifetime_seconds,
     setup_required,
     upsert_user,
@@ -1618,6 +1619,19 @@ def update_settings(payload: SettingsPayload, request: Request):
 def check_source_folder(payload: SourceCheckPayload, request: Request):
     require_role(request, "admin")
     return validate_source(payload.path)
+
+
+@app.post("/api/security/sign-out-browsers")
+def sign_out_every_browser(request: Request):
+    session = require_role(request, "admin")
+    reset_at = rotate_session_secret()
+    audit(session["u"], "security.sessions_reset")
+    detail = (
+        "Every browser has been signed out. This Mac app stays signed in."
+        if session.get("via") == "app"
+        else "Every browser has been signed out, including this one."
+    )
+    return {"status": "success", "reset_at": reset_at, "detail": detail}
 
 
 @app.post("/api/services/restart")

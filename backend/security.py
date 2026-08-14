@@ -216,6 +216,20 @@ def validate_session_token(token):
         return None
 
 
+def rotate_session_secret():
+    """Invalidate every signed-in browser at once.
+
+    Sessions are signed with this secret, so replacing it makes every cookie
+    already issued unverifiable. The native Mac app is unaffected: it
+    authenticates with its own key on every request rather than with a session.
+    """
+    config = load_security_config()
+    config["session_secret"] = _encode(secrets.token_bytes(32))
+    config["sessions_reset_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    save_security_config(config)
+    return config["sessions_reset_at"]
+
+
 def app_sign_in_enabled():
     """Whether the native Mac app may sign itself in without a password."""
     return bool_setting("app_auto_sign_in", "RADIO_APP_AUTO_SIGN_IN", default=True)

@@ -1710,6 +1710,29 @@ class NativeAppSignInTests(unittest.TestCase):
         self.assertEqual(response.status_code, 303)
         self.assertEqual(response.headers["location"], "/")
 
+    def test_signing_out_browsers_leaves_the_app_signed_in(self):
+        browser = TestClient(app, base_url="https://127.0.0.1")
+        self.assertEqual(
+            browser.post(
+                "/api/login",
+                json={"username": "admin", "password": "admin-password"},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(browser.get("/api/me").status_code, 200)
+
+        reset = self.client.post(
+            "/api/security/sign-out-browsers",
+            cookies={"radio_app_key": self.app_key},
+        )
+        self.assertEqual(reset.status_code, 200)
+
+        self.assertEqual(browser.get("/api/me").status_code, 401)
+        self.assertEqual(
+            self.client.get("/api/me", cookies={"radio_app_key": self.app_key}).status_code,
+            200,
+        )
+
     def test_automatic_sign_in_can_be_switched_off(self):
         save_settings({"app_auto_sign_in": False})
         try:

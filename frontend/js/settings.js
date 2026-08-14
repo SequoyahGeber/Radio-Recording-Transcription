@@ -2,6 +2,7 @@
 // screen renders whatever the current build supports without hard-coding it.
 const settingsState = {
   document: null,
+  profile: null,
   pending: new Map(),
   activeGroup: null,
   loading: false,
@@ -149,6 +150,26 @@ function settingsFieldMarkup(field) {
   </div>`;
 }
 
+function settingsSignInFooter() {
+  const source = settingsState.profile?.auth_source;
+  const here =
+    source === "app"
+      ? "This dashboard is the Mac app, signed in automatically on this computer."
+      : "This dashboard is a browser session, signed in with a username and password.";
+  return `<div class="settings-subsection">
+    <h4>Signed-in browsers</h4>
+    <p class="settings-note">${settingsEscape(here)} Signing out every browser
+      ends all browser sessions immediately; the Mac app on this computer is not
+      affected because it authenticates with its own key.</p>
+    <div class="settings-inline-actions">
+      <button class="btn btn-quiet" type="button" data-settings-action="sign-out-browsers">
+        Sign out all browsers
+      </button>
+      <span class="settings-inline-result" data-settings-result="sessions"></span>
+    </div>
+  </div>`;
+}
+
 function settingsGroupMarkup(group) {
   return `<section class="settings-panel" data-settings-panel="${group.id}" hidden>
     <h3>${settingsEscape(group.title)}</h3>
@@ -156,6 +177,7 @@ function settingsGroupMarkup(group) {
     <div class="settings-grid">
       ${group.fields.map(settingsFieldMarkup).join("")}
     </div>
+    ${group.id === "access" ? settingsSignInFooter() : ""}
   </section>`;
 }
 
@@ -412,7 +434,14 @@ function settingsOpen() {
   setTimeout(() => document.getElementById("settings-close")?.focus(), 0);
 }
 
-function settingsClose() {
+function settingsClose(force = false) {
+  if (!force && settingsState.pending.size) {
+    const count = settingsState.pending.size;
+    const confirmed = window.confirm(
+      `Close settings and discard ${count} unsaved change${count === 1 ? "" : "s"}?`,
+    );
+    if (!confirmed) return;
+  }
   settingsModal.hidden = true;
   document.body.classList.remove("settings-open");
   settingsState.pending.clear();
@@ -421,7 +450,9 @@ function settingsClose() {
 }
 
 settingsButton?.addEventListener("click", settingsOpen);
-document.getElementById("settings-close").addEventListener("click", settingsClose);
+document
+  .getElementById("settings-close")
+  .addEventListener("click", () => settingsClose());
 settingsSaveButton.addEventListener("click", settingsSave);
 settingsRevertButton.addEventListener("click", () => {
   if (settingsState.document) settingsRender(settingsState.document);
@@ -459,6 +490,27 @@ settingsPanels.addEventListener("click", (event) => {
     settingsCheckSource(input?.value || "", result);
     return;
   }
+  if (action === "sign-out-browsers") {
+    const result = settingsPanels.querySelector('[data-settings-result="sessions"]');
+    const signedInHere = settingsState.profile?.auth_source !== "app";
+    const warning = signedInHere
+      ? "Sign out every browser, including this one? You will have to sign in again."
+      : "Sign out every browser? This app stays signed in.";
+    if (!window.confirm(warning)) return;
+    result.textContent = "Signing out browsers…";
+    settingsRequest("/api/security/sign-out-browsers", { method: "POST" }).then(
+      (payload) => {
+        result.dataset.tone = "success";
+        result.textContent = payload.detail;
+        if (signedInHere) setTimeout(() => window.location.replace("/login"), 1500);
+      },
+      (error) => {
+        result.dataset.tone = "danger";
+        result.textContent = error.message;
+      },
+    );
+    return;
+  }
   if (action === "copy-address") {
     const address = settingsState.document?.service?.dashboard_url || "";
     navigator.clipboard?.writeText(address).then(
@@ -471,6 +523,11 @@ settingsPanels.addEventListener("click", (event) => {
 });
 settingsModal.addEventListener("click", (event) => {
   if (event.target === settingsModal) settingsClose();
+});
+
+// Saving leaves nothing pending, so a save always closes cleanly afterwards.
+settingsSaveButton.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !settingsSaveButton.disabled) settingsSave();
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !settingsModal.hidden) {
@@ -487,6 +544,11 @@ window.radioApplySourceFolder = function (path) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
   const result = settingsPanels.querySelector('[data-settings-result="source"]');
   if (result) settingsCheckSource(path, result);
+};
+
+// app.js hands the signed-in profile over once it has loaded it.
+window.radioSettingsProfileReady = function (profile) {
+  settingsState.profile = profile;
 };
 
 window.radioOpenSettings = settingsOpen;
