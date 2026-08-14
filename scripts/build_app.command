@@ -65,13 +65,18 @@ for runtime_script in \
 do
     cp "scripts/$runtime_script" "$RUNTIME_DIR/scripts/$runtime_script"
 done
-cp -R "$SITE_PACKAGES_SOURCE" "$RUNTIME_DIR/site-packages"
 # mlx-whisper declares PyTorch for an optional conversion helper, but the app's
 # native MLX transcription path does not import it. Excluding it keeps the
-# self-contained release below GitHub's release-asset size ceiling.
-find "$RUNTIME_DIR/site-packages" -maxdepth 1 \
-    \( -name 'torch' -o -name 'torch-*.dist-info' -o -name 'torchgen' \) \
-    -exec rm -rf {} +
+# self-contained release below GitHub's release-asset size ceiling. The excludes
+# are applied while copying rather than afterwards: PyTorch is over a third of
+# the tree, and reading it only to delete it costs minutes when the checkout
+# lives in an iCloud-synced folder.
+rsync -a \
+    --exclude 'torch/' \
+    --exclude 'torch-*.dist-info/' \
+    --exclude 'torchgen/' \
+    --exclude '__pycache__/' \
+    "$SITE_PACKAGES_SOURCE/" "$RUNTIME_DIR/site-packages/"
 find "$RUNTIME_DIR" -type d -name '__pycache__' -prune -exec rm -rf {} +
 cp sync.py "$RUNTIME_DIR/sync.py"
 cp -R "$PYTHON_FRAMEWORK_SOURCE" "$PYTHON_FRAMEWORK_DESTINATION"
