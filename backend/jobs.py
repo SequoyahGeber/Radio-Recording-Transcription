@@ -187,6 +187,50 @@ def defer_job(job_id, delay_seconds=5, now=None):
         connection.commit()
 
 
+def reclaim_stale_jobs(active_job_ids=(), older_than_seconds=0, now=None):
+    """Return jobs left mid-flight by a stopped worker to the queue.
+
+    A claimed job is marked 'running', and nothing else ever moves it out of
+    that state. If the worker is killed while transcribing - a crash, a restart,
+    a power cut - the recording it was working on would otherwise stay 'running'
+    forever: never dispatched again, and never noticed, because the file exists
+    and the queue looks idle.
+
+    The attempt count is deliberately left as it was, so a recording that
+    reliably takes the worker down with it still retires after max_attempts
+    instead of restarting the process forever.
+    """
+    current = _now(now)
+    cutoff = (current - timedelta(seconds=max(0, float(older_than_seconds)))).isoformat()
+    exclusion = ""
+    parameters = [
+        current.isoformat(),
+        current.isoformat(),
+        cutoff,
+    ]
+    active = [int(value) for value in active_job_ids]
+    if active:
+        exclusion = f"AND id NOT IN ({','.join('?' * len(active))})"
+        parameters.extend(active)
+    with connect() as connection:
+        cursor = connection.execute(
+            f"""
+            UPDATE transcription_jobs
+            SET status = 'retry_wait',
+                scheduled_at = ?,
+                started_at = NULL,
+                updated_at = ?,
+                last_error = 'Requeued after the transcription worker stopped'
+            WHERE status = 'running'
+              AND coalesce(started_at, updated_at) <= ?
+              {exclusion}
+            """,
+            parameters,
+        )
+        connection.commit()
+    return cursor.rowcount
+
+
 def has_live_primary_work(excluding_job_id=None):
     parameters = []
     exclusion = ""

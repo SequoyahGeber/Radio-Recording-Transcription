@@ -44,6 +44,7 @@ from backend.jobs import (
     fail_or_reschedule_job,
     has_live_primary_work,
     queue_summary,
+    reclaim_stale_jobs,
 )
 from backend.security import load_security_config
 from backend.transcript_quality import (
@@ -75,6 +76,11 @@ LIVE_WINDOW_SECONDS = 60 * number_setting(
 MAX_RETRIES = 20
 RETRY_DELAY = 10.0
 RECONCILE_SECONDS = max(60, int(os.environ.get("RADIO_RECONCILE_SECONDS", "300")))
+# A claimed job untouched for this long belongs to a worker that is gone. It is
+# far longer than any real transcription so a slow recording is never stolen
+# from the process still working on it.
+STALE_JOB_SECONDS = 30 * 60
+STALE_JOB_CHECK_SECONDS = 5 * 60
 
 
 # These are read on every use so an administrator can retune the rescue pass
@@ -123,6 +129,9 @@ print(f"[DATABASE] Connected to {DB_NAME} successfully.")
 transcription_queue = PriorityQueue()
 queue_sequence = count()
 queued_files = set()
+# Jobs this process has claimed. Anything marked 'running' in the database that
+# is not in here belongs to a worker that is no longer alive.
+active_job_ids = set()
 queue_lock = Lock()
 
 os.makedirs(MODEL_DIR, exist_ok=True)
@@ -578,6 +587,8 @@ def process_task(item):
             queued_files.discard(queue_key)
         transcription_queue.task_done()
         return
+    with queue_lock:
+        active_job_ids.add(job_id)
 
     try:
         if not os.path.exists(filepath):
@@ -887,6 +898,7 @@ def process_task(item):
     finally:
         with queue_lock:
             queued_files.discard(queue_key)
+            active_job_ids.discard(job_id)
         transcription_queue.task_done()
 
 def transcription_worker():
@@ -902,6 +914,7 @@ def transcription_worker():
             try:
                 with queue_lock:
                     queued_files.discard((item[3], item[5]))
+                    active_job_ids.discard(item[7])
             except (IndexError, TypeError):
                 pass
             try:
@@ -1047,15 +1060,34 @@ def periodic_reconciliation():
 
 
 def durable_job_dispatcher():
+    next_reclaim = time.monotonic() + STALE_JOB_CHECK_SECONDS
     while True:
         try:
             dispatch_due_jobs()
+            if time.monotonic() >= next_reclaim:
+                next_reclaim = time.monotonic() + STALE_JOB_CHECK_SECONDS
+                with queue_lock:
+                    claimed_here = tuple(active_job_ids)
+                recovered = reclaim_stale_jobs(
+                    claimed_here,
+                    older_than_seconds=STALE_JOB_SECONDS,
+                )
+                if recovered:
+                    print(
+                        f"[QUEUE] Requeued {recovered} job(s) left behind by a "
+                        "stopped transcription worker."
+                    )
         except Exception as exc:
             print(f"[QUEUE] Durable job dispatcher failed: {exc}")
         time.sleep(1)
 
 def run_service():
     """Start the queue workers, the folder watcher, and block until interrupted."""
+    # Nothing else claims jobs, so anything still marked 'running' at startup was
+    # interrupted by the previous worker stopping and has to go back in the queue.
+    orphaned = reclaim_stale_jobs()
+    if orphaned:
+        print(f"[STARTUP] Requeued {orphaned} recording(s) interrupted by a restart.")
     queue_existing_unprocessed_files()
     queue_existing_quality_retries()
 

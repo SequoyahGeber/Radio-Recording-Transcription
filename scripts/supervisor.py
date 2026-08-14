@@ -112,6 +112,33 @@ def transcription_is_enabled():
     return bool(live_settings().get("transcription_enabled", True))
 
 
+def worker_stall_seconds():
+    return number_setting(
+        "worker_stall_restart_seconds", default=600, minimum=0, maximum=86400
+    )
+
+
+def heartbeat_age_seconds(service):
+    """Seconds since a service last reported in, or None if it never has."""
+    try:
+        from backend.database import connect
+
+        with connect(read_only=True) as connection:
+            row = connection.execute(
+                "SELECT last_seen FROM service_heartbeats WHERE service = ?",
+                (service,),
+            ).fetchone()
+        if row is None:
+            return None
+        return max(
+            0.0,
+            (datetime.now() - datetime.fromisoformat(row["last_seen"])).total_seconds(),
+        )
+    except Exception:
+        # A database that cannot be read is not evidence that a service stalled.
+        return 0.0
+
+
 def handle_signal(signum, frame):
     del signum, frame
     global STOPPING
@@ -254,6 +281,31 @@ class ManagedProcess:
         else:
             self.stop()
 
+    def restart_if_wedged(self, silent_seconds):
+        """Restart a process that is alive but has stopped reporting in.
+
+        A crashed service exits and is restarted by the poll above. A wedged one
+        does not: the transcription worker can hang forever inside a GPU or
+        model import, staying 'running' while transcribing nothing. Without this
+        check that state survives until a person notices.
+        """
+        if not self.running or not silent_seconds:
+            return False
+        age = heartbeat_age_seconds(self.name)
+        running_for = time.monotonic() - self.started_at
+        if running_for < silent_seconds:
+            return False
+        if age is not None and age < silent_seconds:
+            return False
+        self.write_log(
+            f"[{datetime.now().isoformat()}] No heartbeat for "
+            f"{int(running_for)}s; restarting the stalled service.\n"
+        )
+        self.stop()
+        self.failure_count += 1
+        self.next_start = time.monotonic() + min(60, 2 ** min(self.failure_count, 6))
+        return True
+
 
 def main():
     os.makedirs(LOG_DIR, exist_ok=True)
@@ -320,6 +372,8 @@ def main():
             process_by_name["server"].poll_and_restart_if_needed()
             process_by_name["sync"].poll_and_restart_if_needed()
             process_by_name["worker"].reconcile(transcription_enabled)
+            if transcription_enabled:
+                process_by_name["worker"].restart_if_wedged(worker_stall_seconds())
             write_status(processes, transcription_enabled)
             time.sleep(1)
     finally:

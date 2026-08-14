@@ -31,6 +31,7 @@ from backend.jobs import (
     due_jobs,
     enqueue_job,
     fail_or_reschedule_job,
+    reclaim_stale_jobs,
 )
 from backend.transcript_quality import (
     assess_transcript,
@@ -126,6 +127,35 @@ class DurableJobTests(unittest.TestCase):
         self.assertIsNotNone(claim_job(job["id"]))
         exhausted = fail_or_reschedule_job(job["id"], "permanent", delay_seconds=0)
         self.assertEqual(exhausted["status"], "failed")
+
+    def test_a_job_interrupted_by_a_stopped_worker_returns_to_the_queue(self):
+        path = f"Dispatch/interrupted-{datetime.now().timestamp()}.wav"
+        job = enqueue_job("primary", path)
+        claimed = claim_job(job["id"])
+        self.assertEqual(claimed["status"], "running")
+        # A killed worker leaves the job here: never dispatched, never retried.
+        self.assertNotIn(job["id"], [item["id"] for item in due_jobs()])
+
+        self.assertEqual(reclaim_stale_jobs(), 1)
+
+        recovered = next(item for item in due_jobs() if item["id"] == job["id"])
+        self.assertEqual(recovered["status"], "retry_wait")
+        self.assertIsNone(recovered["started_at"])
+        # The attempt is still counted, so a recording that keeps killing the
+        # worker eventually retires instead of looping forever.
+        self.assertEqual(recovered["attempt_count"], 1)
+
+    def test_a_job_this_worker_is_running_is_left_alone(self):
+        path = f"Dispatch/in-flight-{datetime.now().timestamp()}.wav"
+        job = enqueue_job("primary", path)
+        claim_job(job["id"])
+
+        self.assertEqual(reclaim_stale_jobs(active_job_ids=[job["id"]]), 0)
+        self.assertEqual(
+            reclaim_stale_jobs(older_than_seconds=1800),
+            0,
+            "a job claimed moments ago must not be treated as abandoned",
+        )
 
     def test_completed_job_is_not_requeued_by_duplicate_event(self):
         path = f"Security/complete-{datetime.now().timestamp()}.wav"

@@ -200,6 +200,20 @@ SETTINGS_GROUPS = [
                 "environment": "RADIO_MAX_RESCUE_RETRIES",
                 "restart": "none",
             },
+            {
+                "key": "worker_stall_restart_seconds",
+                "label": "Restart a silent worker after",
+                "help": (
+                    "If transcription stops reporting for this long it is restarted "
+                    "automatically. Set to 0 to leave a stalled worker alone."
+                ),
+                "type": "integer",
+                "default": 600,
+                "minimum": 0,
+                "maximum": 86400,
+                "unit": "seconds",
+                "restart": "none",
+            },
         ],
     },
     {
