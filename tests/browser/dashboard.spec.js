@@ -712,11 +712,20 @@ test("settings screen edits real values and reports what needs a restart", async
   await page.locator("#settings-save").click();
   await expect(page.locator("#settings-status")).toHaveText(/Settings saved/);
 
-  // Out-of-range input is refused with the reason, not silently clamped.
+  // Out-of-range input says so as it is typed, and blocks the save.
   await settings.getByRole("button", { name: "Storage and history", exact: true }).click();
   await settings.locator("#setting-backup_retention_count").fill("500");
-  await page.locator("#settings-save").click();
-  await expect(page.locator("#settings-status")).toHaveText(/at most 90/);
+  await expect(
+    settings.locator('[data-setting-field="backup_retention_count"] .settings-field-problem'),
+  ).toHaveText(/at most 90/);
+  await expect(page.locator("#settings-save")).toBeDisabled();
+
+  // A valid but unsaved edit is what the close guard is meant to protect.
+  await settings.locator("#setting-backup_retention_count").fill("12");
+  await expect(
+    settings.locator('[data-setting-field="backup_retention_count"] .settings-field-problem'),
+  ).toHaveCount(0);
+  await expect(page.locator("#settings-save")).toBeEnabled();
 
   await settings.getByRole("button", { name: "System", exact: true }).click();
   await expect(settings.getByText("Archive database")).toBeVisible();
@@ -735,7 +744,7 @@ test("settings screen edits real values and reports what needs a restart", async
   await page.locator("#settings-close").click();
   await expect(settings).toBeHidden();
 
-  // Nothing was saved by the refused edit.
+  // The discarded edit was never saved.
   await page.locator("#settings-button").click();
   await settings.getByRole("button", { name: "Storage and history", exact: true }).click();
   await expect(settings.locator("#setting-backup_retention_count")).toHaveValue("10");

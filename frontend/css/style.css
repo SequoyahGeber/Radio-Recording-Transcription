@@ -4874,3 +4874,14 @@ body.player-open #dashboard {
 .settings-subsection h4 {
   margin-top: 0;
 }
+
+.settings-field.has-problem input,
+.settings-field.has-problem select {
+  border-color: var(--alert-danger);
+}
+
+.settings-field-problem {
+  color: var(--alert-danger);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}

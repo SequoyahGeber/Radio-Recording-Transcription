@@ -4,6 +4,7 @@ const settingsState = {
   document: null,
   profile: null,
   pending: new Map(),
+  problems: new Map(),
   activeGroup: null,
   loading: false,
   restartScope: "none",
@@ -243,6 +244,7 @@ function settingsAboutMarkup(document_) {
 function settingsRender(document_) {
   settingsState.document = document_;
   settingsState.pending.clear();
+  settingsState.problems.clear();
   const groups = document_.groups || [];
   settingsTabs.innerHTML = [
     ...groups.map(
@@ -333,7 +335,8 @@ function settingsFieldByKey(key) {
 
 function settingsUpdateDirtyState() {
   const dirty = settingsState.pending.size;
-  settingsSaveButton.disabled = dirty === 0 || settingsState.loading;
+  const blocked = settingsState.problems.size > 0;
+  settingsSaveButton.disabled = dirty === 0 || settingsState.loading || blocked;
   settingsRevertButton.disabled = dirty === 0 || settingsState.loading;
   settingsSaveButton.textContent = dirty
     ? `Save ${dirty} change${dirty === 1 ? "" : "s"}`
@@ -352,12 +355,61 @@ function settingsShowRestart(scope) {
   }
 }
 
+function settingsFieldProblem(field, control) {
+  if (field.type === "integer") {
+    if (control.value.trim() === "") return "Enter a value.";
+    const entered = Number(control.value);
+    if (!Number.isFinite(entered)) return "Enter a number.";
+    const unit = field.unit ? ` ${field.unit}` : "";
+    if (field.minimum !== undefined) {
+      const low = settingsDisplayValue(field, field.minimum);
+      if (entered < low) return `Must be at least ${low}${unit}.`;
+    }
+    if (field.maximum !== undefined) {
+      const high = settingsDisplayValue(field, field.maximum);
+      if (entered > high) return `Must be at most ${high}${unit}.`;
+    }
+  }
+  if (field.type === "path" && !control.value.trim().startsWith("/")) {
+    return "Enter a full folder path, starting with /.";
+  }
+  return "";
+}
+
+function settingsShowFieldProblem(key, message) {
+  const wrapper = settingsPanels.querySelector(`[data-setting-field="${key}"]`);
+  if (!wrapper) return;
+  wrapper.classList.toggle("has-problem", Boolean(message));
+  let notice = wrapper.querySelector(".settings-field-problem");
+  if (!message) {
+    notice?.remove();
+    settingsState.problems.delete(key);
+    return;
+  }
+  if (!notice) {
+    notice = document.createElement("p");
+    notice.className = "settings-field-problem";
+    notice.setAttribute("role", "alert");
+    wrapper.appendChild(notice);
+  }
+  notice.textContent = message;
+  settingsState.problems.set(key, message);
+}
+
 function settingsHandleInput(event) {
   const control = event.target.closest("[data-setting-key]");
   if (!control) return;
   const key = control.dataset.settingKey;
   const field = settingsFieldByKey(key);
   if (!field) return;
+  // Say what is wrong as it is typed, rather than only after a failed save.
+  const problem = settingsFieldProblem(field, control);
+  settingsShowFieldProblem(key, problem);
+  if (problem) {
+    settingsState.pending.delete(key);
+    settingsUpdateDirtyState();
+    return;
+  }
   let value;
   if (field.type === "boolean") {
     value = control.checked;
