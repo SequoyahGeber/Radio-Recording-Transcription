@@ -31,6 +31,10 @@ them with Whisper, and presents a secure live operations dashboard.
 - Five actionable health components explain source, sync, transcription,
   delivery, and storage state with last success, queue depth, errors, and safe
   recovery guidance. Administrators can export a redacted diagnostics bundle.
+- A verified backup can be restored from the dashboard; the services restart to
+  swap the archive and the replaced database is kept so a restore can be undone.
+- Recordings interrupted by a stopped worker are returned to the queue instead
+  of being stranded, and a worker that stops reporting is restarted.
 - Repetitive or low-confidence transcripts are quarantined for supervisor review.
 - Operators use a five-state review workflow, bookmarks, notes, immutable
   change history, and an eight-second undo window.
@@ -253,6 +257,15 @@ DMG filename, bundle version, and release tag must match exactly.
 
 ## Operations and recovery
 
+Verified backups are taken automatically on the configured interval, and older
+ones are pruned to the retention count. A backup can be restored from
+**Deployment & recovery** in the dashboard controls: the dashboard verifies it,
+queues the restore, and restarts the services, because the archive cannot be
+replaced while the dashboard, worker, and sync process hold it open. The
+supervisor performs the swap before it starts anything, keeps a copy of the
+database being replaced beside the new one, and abandons the restore rather than
+retrying if the backup fails its checksum.
+
 Service logs can be viewed from **Console** by the administrator. The native
 app can restart all services or control the transcription worker independently.
 Stopping transcription leaves the dashboard and recording sync online.
@@ -285,20 +298,25 @@ scripts/run_tests.command
 The Python suite covers multi-year schema/import migration, live-first ordering,
 verified copies, garbage-transcript classification, access control, archive
 pagination, uncapped streaming export, versioned review history, workspace
-visibility, model management, and updater safety. The API suite verifies FTS5
+visibility, model management, interrupted-job recovery, and updater safety.
+The API suite verifies FTS5
 phrases, prefixes, snippets, facets, exact year counts, cursors, reindexing,
 preferences, saved-search authorization, alert matching/deduplication,
 acknowledgement conflicts, event replay, two-user WebSocket propagation, and
 unique-user presence. It also verifies incident concurrency, transmission
 linking, tasks, notes, shift handoff, actionable health, and redacted diagnostic
-archives. The Playwright suite starts an isolated HTTPS server,
+archives. It also verifies native-app sign-in and its cross-site refusal,
+session renewal, ending every browser session, the settings surface and its
+validation, history pruning, and restoring an archive from a verified backup.
+The Playwright suite starts an isolated HTTPS server,
 creates 176 disposable transmissions across eight realistic feeds and three
 years, and checks authentication, indexed archive search, filtering,
 pagination, saved views, the alert inbox, rule testing, acknowledgement,
 incident creation/linking/tasks, shift handoff, the five-part health center,
 overlay controls, the console, detail editing and undo, the global player,
-shortcuts, workspaces, full export, mobile feed navigation, and feed geometry
-from 320 through 1,920 pixels in the installed stable Google Chrome.
+shortcuts, workspaces, full export, the administrator settings screen, the Mac
+app signing itself in, mobile feed navigation, and feed geometry from 320
+through 1,920 pixels in the installed stable Google Chrome.
 
 The same command runs a deterministic 100,000- and 500,000-row FTS5 benchmark.
 Its exact-count search must remain below a 200 ms p95 gate at both sizes.
