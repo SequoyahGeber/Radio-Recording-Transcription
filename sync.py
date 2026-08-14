@@ -4,22 +4,85 @@ import shutil
 import time
 from datetime import datetime
 
-from backend.config import AUDIO_DIR, RECORDING_SOURCE_DIR
+from backend.config import (
+    AUDIO_DIR,
+    RECORDING_SOURCE_DIR,
+    bool_setting,
+    number_setting,
+    text_setting,
+)
 from backend.database import connect, initialize_database, update_heartbeat
 
 
-POLL_SECONDS = max(5, int(os.environ.get("RADIO_SYNC_POLL_SECONDS", "15")))
-SETTLE_SECONDS = max(2, int(os.environ.get("RADIO_SYNC_SETTLE_SECONDS", "10")))
-LIVE_WINDOW_SECONDS = max(
-    60, int(os.environ.get("RADIO_LIVE_WINDOW_MINUTES", "30")) * 60
-)
-BACKLOG_BATCH_SIZE = max(1, int(os.environ.get("RADIO_SYNC_BATCH_SIZE", "250")))
-VERIFY_SHA256 = os.environ.get("RADIO_SYNC_VERIFY_SHA256", "1") != "0"
 AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a")
-MIN_FREE_BYTES = max(
-    1_000_000_000,
-    int(os.environ.get("RADIO_SYNC_MIN_FREE_BYTES", str(10 * 1024**3))),
-)
+_announced = {}
+
+
+def announce(message, key, repeat_seconds=900):
+    """Print a status line, but not the same one over and over.
+
+    Sync runs every few seconds forever. Repeating an unchanged status on each
+    pass produced megabytes of identical log lines a day.
+    """
+    now = time.monotonic()
+    previous_message, previous_time = _announced.get(key, (None, 0.0))
+    if previous_message == message and now - previous_time < repeat_seconds:
+        return
+    _announced[key] = (message, now)
+    print(message)
+
+
+# Every tunable is read at the start of each pass, so changing the recording
+# folder or a timing value in the settings screen takes effect within seconds
+# and never needs a service restart.
+def source_directory():
+    return os.path.abspath(
+        os.path.expanduser(
+            text_setting("source_dir", "RADIO_SOURCE_DIR", RECORDING_SOURCE_DIR)
+        )
+    )
+
+
+def poll_seconds():
+    return number_setting(
+        "sync_poll_seconds", "RADIO_SYNC_POLL_SECONDS", 15, minimum=5, maximum=600
+    )
+
+
+def settle_seconds():
+    return number_setting(
+        "sync_settle_seconds", "RADIO_SYNC_SETTLE_SECONDS", 10, minimum=2, maximum=300
+    )
+
+
+def live_window_seconds():
+    return 60 * number_setting(
+        "live_window_minutes",
+        "RADIO_LIVE_WINDOW_MINUTES",
+        30,
+        minimum=1,
+        maximum=1440,
+    )
+
+
+def backlog_batch_size():
+    return number_setting(
+        "sync_batch_size", "RADIO_SYNC_BATCH_SIZE", 250, minimum=1, maximum=5000
+    )
+
+
+def verify_sha256():
+    return bool_setting("sync_verify_sha256", "RADIO_SYNC_VERIFY_SHA256", True)
+
+
+def minimum_free_bytes():
+    return number_setting(
+        "minimum_free_bytes",
+        "RADIO_SYNC_MIN_FREE_BYTES",
+        10 * 1024**3,
+        minimum=1024**3,
+        maximum=4000 * 1024**3,
+    )
 
 
 def recorded_at(filename, source_stat=None):
@@ -31,15 +94,17 @@ def recorded_at(filename, source_stat=None):
         return datetime.fromtimestamp(source_stat.st_mtime)
 
 
-def candidate_files():
+def candidate_files(source_dir=None, live_window=None):
+    source_dir = source_dir or source_directory()
+    live_window = live_window or live_window_seconds()
     now = datetime.now()
     candidates = []
-    for root, _, files in os.walk(RECORDING_SOURCE_DIR):
+    for root, _, files in os.walk(source_dir):
         for filename in files:
             if not filename.lower().endswith(AUDIO_EXTENSIONS):
                 continue
             source_path = os.path.join(root, filename)
-            relative_path = os.path.relpath(source_path, RECORDING_SOURCE_DIR)
+            relative_path = os.path.relpath(source_path, source_dir)
             source_stat = None
             recording_time = recorded_at(filename)
             if recording_time is None:
@@ -48,7 +113,7 @@ def candidate_files():
                 except OSError:
                     continue
                 recording_time = recorded_at(filename, source_stat)
-            is_live = (now - recording_time).total_seconds() <= LIVE_WINDOW_SECONDS
+            is_live = (now - recording_time).total_seconds() <= live_window
             candidates.append(
                 (
                     0 if is_live else 1,
@@ -75,14 +140,15 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
-def source_is_stable(source_path, source_stat):
+def source_is_stable(source_path, source_stat, settle=None):
     del source_path
+    settle = settle_seconds() if settle is None else settle
     if source_stat.st_size == 0:
         return False
     # Once a source has not changed for the settle window it can be copied
     # immediately. A second full archive scan is unnecessary because
     # copy_verified checks the source identity again after reading it.
-    return source_stat.st_mtime <= time.time() - SETTLE_SECONDS
+    return source_stat.st_mtime <= time.time() - settle
 
 
 def load_sync_records():
@@ -185,7 +251,10 @@ def record_sync(relative_path, source_stat, checksum):
     )
 
 
-def copy_verified(relative_path, source_path, source_stat, destination_path):
+def copy_verified(
+    relative_path, source_path, source_stat, destination_path, verify=None
+):
+    verify = verify_sha256() if verify is None else verify
     os.makedirs(os.path.dirname(destination_path), exist_ok=True)
     temporary_path = f"{destination_path}.part"
     try:
@@ -194,7 +263,7 @@ def copy_verified(relative_path, source_path, source_stat, destination_path):
         # read the audio but are not permitted to apply that metadata locally.
         # Only the recording bytes are required; integrity is verified below.
         # Hash during the copy so the network file is read only once.
-        source_digest = hashlib.sha256() if VERIFY_SHA256 else None
+        source_digest = hashlib.sha256() if verify else None
         with open(source_path, "rb") as source_handle, open(
             temporary_path, "wb"
         ) as destination_handle:
@@ -214,7 +283,7 @@ def copy_verified(relative_path, source_path, source_stat, destination_path):
         if os.path.getsize(temporary_path) != source_stat.st_size:
             raise OSError("copied file size does not match source")
         checksum = None
-        if VERIFY_SHA256:
+        if verify:
             source_checksum = source_digest.hexdigest()
             destination_checksum = file_sha256(temporary_path)
             if source_checksum != destination_checksum:
@@ -247,13 +316,14 @@ def destination_write_error():
 
 
 def sync_once():
-    if not os.path.isdir(RECORDING_SOURCE_DIR):
+    source_dir = source_directory()
+    if not os.path.isdir(source_dir):
         update_heartbeat(
             "sync",
             "waiting",
-            {"source_mounted": False, "source_directory": RECORDING_SOURCE_DIR},
+            {"source_mounted": False, "source_directory": source_dir},
         )
-        print(f"[SYNC] Waiting for network mount: {RECORDING_SOURCE_DIR}")
+        announce(f"[SYNC] Waiting for network mount: {source_dir}", key="waiting")
         return
 
     write_error = destination_write_error()
@@ -261,19 +331,26 @@ def sync_once():
         details = {
             "reason": "destination_not_writable",
             "source_mounted": True,
-            "source_directory": RECORDING_SOURCE_DIR,
+            "source_directory": source_dir,
             "destination_directory": AUDIO_DIR,
             "error": write_error[:500],
         }
         update_heartbeat("sync", "error", details)
-        print(f"[SYNC] Destination is not writable: {AUDIO_DIR}: {write_error}")
+        announce(
+            f"[SYNC] Destination is not writable: {AUDIO_DIR}: {write_error}",
+            key="destination",
+        )
         return
 
     copied = 0
     skipped = 0
     unsettled = 0
     failed = 0
-    candidates = candidate_files()
+    settle = settle_seconds()
+    verify = verify_sha256()
+    reserve = minimum_free_bytes()
+    batch_size = backlog_batch_size()
+    candidates = candidate_files(source_dir)
     sync_records = load_sync_records()
     adopted_records = []
     free_bytes = shutil.disk_usage(AUDIO_DIR).free
@@ -305,15 +382,20 @@ def sync_once():
         ):
             skipped += 1
             continue
-        if not source_is_stable(source_path, source_stat):
+        if not source_is_stable(source_path, source_stat, settle):
             unsettled += 1
             continue
-        if free_bytes < MIN_FREE_BYTES:
+        if free_bytes < reserve:
             paused_reason = "low_disk_space"
-            print("[SYNC] Paused: local free space is below the configured safety reserve.")
+            announce(
+                "[SYNC] Paused: local free space is below the configured safety reserve.",
+                key="low_disk",
+            )
             break
         try:
-            copy_verified(relative_path, source_path, source_stat, destination_path)
+            copy_verified(
+                relative_path, source_path, source_stat, destination_path, verify
+            )
             copied += 1
             free_bytes = max(0, free_bytes - source_stat.st_size)
             queue_name = "LIVE" if tier == 0 else "BACKLOG"
@@ -324,7 +406,7 @@ def sync_once():
             print(f"[SYNC] Copy failed for {relative_path}: {exc}")
             if failed >= 10:
                 break
-        if tier == 1 and copied >= BACKLOG_BATCH_SIZE:
+        if tier == 1 and copied >= batch_size:
             # Rescan now so a newly arrived live recording never waits for the whole archive.
             break
 
@@ -338,7 +420,7 @@ def sync_once():
         {
             "reason": heartbeat_reason,
             "source_mounted": True,
-            "source_directory": RECORDING_SOURCE_DIR,
+            "source_directory": source_dir,
             "destination_directory": AUDIO_DIR,
             "source_files": len(candidates),
             "copied_this_pass": copied,
@@ -349,17 +431,22 @@ def sync_once():
             "free_bytes": free_bytes,
         },
     )
-    print(
+    summary = (
         f"[SYNC] Pass complete: source={len(candidates)}, copied={copied}, "
         f"already_local={skipped}, unsettled={unsettled}, failed={failed}"
     )
+    if copied or failed or paused_reason:
+        print(summary)
+    else:
+        # A quiet pass every few seconds must not fill the log for months on end.
+        announce(summary, key="idle", repeat_seconds=3600)
 
 
 if __name__ == "__main__":
     os.makedirs(AUDIO_DIR, exist_ok=True)
     initialize_database()
     print(
-        f"[SYNC] Live-first reconciliation from '{RECORDING_SOURCE_DIR}' "
+        f"[SYNC] Live-first reconciliation from '{source_directory()}' "
         f"to '{AUDIO_DIR}'."
     )
     while True:
@@ -368,4 +455,4 @@ if __name__ == "__main__":
         except Exception as exc:
             update_heartbeat("sync", "error", {"error": str(exc)[:500]})
             print(f"[SYNC] Pass failed: {exc}")
-        time.sleep(POLL_SECONDS)
+        time.sleep(poll_seconds())

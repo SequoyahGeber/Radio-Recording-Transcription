@@ -32,6 +32,7 @@ async function phaseSevenRefresh() {
         phaseSevenState.latestBackup.created_at,
       ).toLocaleString()}`
     : "No recovery backup has been created yet.";
+  phaseSevenRenderBackups(history.backups || []);
   const analytics = quality.analytics;
   const percent = (value) =>
     value === null || value === undefined ? "Not enough reviews" : `${(value * 100).toFixed(1)}%`;
@@ -52,6 +53,65 @@ async function phaseSevenRefresh() {
         )}% Medium quality</div>`,
     )
     .join("");
+}
+
+function phaseSevenRenderBackups(backups) {
+  const list = document.getElementById("backup-list");
+  list.replaceChildren();
+  if (!backups.length) {
+    const empty = document.createElement("p");
+    empty.className = "backup-empty";
+    empty.textContent =
+      "Backups appear here once one has been created. They are also taken automatically.";
+    list.appendChild(empty);
+    return;
+  }
+  for (const backup of backups.slice(0, 5)) {
+    const row = document.createElement("div");
+    row.className = "backup-row";
+    const summary = document.createElement("div");
+    summary.className = "backup-summary";
+    const when = new Date(backup.created_at);
+    summary.innerHTML =
+      `<strong>${escapeHTML(
+        Number.isNaN(when.getTime()) ? backup.created_at : when.toLocaleString(),
+      )}</strong>` +
+      `<span>${escapeHTML(backup.status)} · ${Math.max(
+        1,
+        Math.round(Number(backup.database_bytes || 0) / 1024 / 1024),
+      )} MB · ${Number(backup.transcript_count || 0).toLocaleString()} transcripts</span>` +
+      (backup.last_error
+        ? `<span class="backup-error">${escapeHTML(backup.last_error)}</span>`
+        : "");
+    const verify = document.createElement("button");
+    verify.type = "button";
+    verify.className = "btn btn-quiet";
+    verify.textContent = "Verify";
+    verify.addEventListener("click", () => phaseSevenVerifyBackup(backup.id, verify));
+    row.append(summary, verify);
+    list.appendChild(row);
+  }
+}
+
+async function phaseSevenVerifyBackup(backupId, button) {
+  button.disabled = true;
+  const status = document.getElementById("backup-status");
+  status.textContent = "Verifying the stored backup…";
+  try {
+    const result = await phaseSevenJson(`/api/backups/${backupId}/verify`, {
+      method: "POST",
+    });
+    status.textContent = `Backup verified · ${Number(
+      result.transcript_count || 0,
+    ).toLocaleString()} transcripts checked`;
+    showToast("Backup verified.", "success");
+    await phaseSevenRefresh();
+  } catch (error) {
+    status.textContent = error.message;
+    showToast(error.message, "danger");
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function phaseSevenCreateBackup() {

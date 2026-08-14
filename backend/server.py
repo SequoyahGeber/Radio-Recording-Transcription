@@ -4,8 +4,12 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
+import socket
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 import zipfile
@@ -38,19 +42,22 @@ from backend.alerts import (
 from backend.analytics import list_profiles, quality_analytics, save_profile
 from backend.backups import (
     create_backup,
-    create_scheduled_backup_if_due,
     list_backups,
     restore_drill,
     verify_backup,
 )
+from backend.maintenance import start_maintenance_thread
+from backend.settings_api import apply_settings, settings_document
 from backend.config import (
     AUDIO_DIR,
     DB_NAME,
     LOG_DIR,
     PROJECT_ROOT,
     RADIO_HOST,
+    RADIO_PORT,
     RECORDING_SOURCE_DIR,
     load_settings,
+    number_setting,
     save_settings,
 )
 from backend.database import audit, connect, initialize_database
@@ -67,13 +74,18 @@ from backend.incidents import (
     task_row_to_dict,
 )
 from backend.security import (
+    APP_KEY_COOKIE,
+    APP_KEY_HEADER,
     SESSION_COOKIE,
-    SESSION_SECONDS,
+    app_session,
+    app_sign_in_enabled,
     authenticate_user,
     create_initial_admin,
     create_session_token,
+    find_user,
     list_users,
     role_allows,
+    session_lifetime_seconds,
     setup_required,
     upsert_user,
     validate_session_token,
@@ -99,8 +111,10 @@ ALLOWED_HOSTS = list(
     dict.fromkeys([RADIO_HOST, "127.0.0.1", "localhost", os.environ.get("RADIO_HOSTNAME", "")])
 )
 ALLOWED_HOSTS = [host for host in ALLOWED_HOSTS if host]
-LOGIN_WINDOW_SECONDS = 15 * 60
-MAX_LOGIN_FAILURES = 5
+if "0.0.0.0" in ALLOWED_HOSTS or "::" in ALLOWED_HOSTS:
+    # Serving every interface means the Host header can legitimately be any
+    # address this Mac answers to, so host filtering cannot narrow it further.
+    ALLOWED_HOSTS = ["*"]
 HEARTBEAT_STALE_SECONDS = 45
 CONTENT_SECURITY_POLICY = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
@@ -119,17 +133,12 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 
 
 @app.on_event("startup")
-def schedule_recovery_backup():
-    if setup_required() or os.environ.get("RADIO_DISABLE_AUTOMATIC_BACKUP") == "1":
+def start_background_maintenance():
+    if os.environ.get("RADIO_DISABLE_AUTOMATIC_BACKUP") == "1":
         return
-
-    def run_backup():
-        try:
-            create_scheduled_backup_if_due()
-        except Exception:
-            logger.exception("Automatic recovery backup failed")
-
-    threading.Thread(target=run_backup, daemon=True).start()
+    # Backups, history pruning, log cleanup, and WAL checkpoints keep running
+    # for as long as the dashboard does, not just once at startup.
+    start_maintenance_thread(logger)
 
 
 class ConnectionManager:
@@ -236,6 +245,14 @@ class SetupConfigurationPayload(BaseModel):
     transcription_enabled: bool = True
     minimum_free_gb: int = 10
     setup_step: int = 2
+
+
+class SettingsPayload(BaseModel):
+    values: dict
+
+
+class SourceCheckPayload(BaseModel):
+    path: str
 
 
 class TranscriptUpdatePayload(BaseModel):
@@ -432,8 +449,27 @@ def secure_headers(response):
     return response
 
 
+def presented_app_key(headers, cookies):
+    """Read the native app's key from a request, ignoring cross-site traffic.
+
+    Only the Mac app can hold this key, because only a process running as the
+    Mac account can read security.json. Refusing cross-site requests keeps a
+    page the app was navigated to from borrowing the key with a background fetch.
+    """
+    if headers.get("sec-fetch-site", "").lower() == "cross-site":
+        return None
+    return headers.get(APP_KEY_HEADER.lower()) or cookies.get(APP_KEY_COOKIE)
+
+
 def get_session(request):
-    return validate_session_token(request.cookies.get(SESSION_COOKIE))
+    cached = getattr(request.state, "radio_session", None)
+    if cached is not None:
+        return cached or None
+    session = validate_session_token(request.cookies.get(SESSION_COOKIE))
+    if not session:
+        session = app_session(presented_app_key(request.headers, request.cookies))
+    request.state.radio_session = session or False
+    return session
 
 
 def require_role(request, minimum_role):
@@ -449,6 +485,38 @@ def wants_html(request):
     return "text/html" in request.headers.get("accept", "")
 
 
+def set_session_cookie(response, token):
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=session_lifetime_seconds(),
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        path="/",
+    )
+    return response
+
+
+def renew_session_if_needed(request, response):
+    """Extend a browser session that is more than halfway through its life.
+
+    Without this the dashboard signs an operator out on a fixed schedule even
+    while they are actively using it.
+    """
+    session = getattr(request.state, "radio_session", None)
+    if not session or session.get("via") == "app":
+        return response
+    expires_at = int(session.get("exp", 0))
+    lifetime = session_lifetime_seconds()
+    if expires_at - int(time.time()) > lifetime // 2:
+        return response
+    user = find_user(session.get("u", ""))
+    if not user or not user.get("active", True):
+        return response
+    return set_session_cookie(response, create_session_token(user))
+
+
 @app.middleware("http")
 async def authentication_and_headers(request: Request, call_next):
     path = request.url.path
@@ -459,7 +527,7 @@ async def authentication_and_headers(request: Request, call_next):
     if is_internal:
         if not verify_internal_token(request.headers.get("X-Radio-Internal-Token")):
             return secure_headers(JSONResponse({"detail": "Forbidden"}, status_code=403))
-    elif setup_required():
+    elif setup_required() and not get_session(request):
         if not is_setup_public and not path.startswith("/static/"):
             if wants_html(request) and not path.startswith("/api/"):
                 return secure_headers(RedirectResponse("/setup", status_code=303))
@@ -483,20 +551,35 @@ async def authentication_and_headers(request: Request, call_next):
             )
 
     response = await call_next(request)
-    return secure_headers(response)
+    return secure_headers(renew_session_if_needed(request, response))
 
 
 def client_key(request):
     return request.client.host if request.client else "unknown"
 
 
+def login_window_seconds():
+    return 60 * number_setting(
+        "login_window_minutes", default=15, minimum=1, maximum=1440
+    )
+
+
+def maximum_login_failures():
+    return number_setting("login_max_failures", default=5, minimum=3, maximum=50)
+
+
 def login_is_limited(key):
-    cutoff = time.time() - LOGIN_WINDOW_SECONDS
+    cutoff = time.time() - login_window_seconds()
     with login_lock:
-        attempts = login_failures[key]
-        while attempts and attempts[0] < cutoff:
-            attempts.popleft()
-        return len(attempts) >= MAX_LOGIN_FAILURES
+        # Drop expired attempts for every address so this never grows without
+        # bound on an installation that is reachable from a network.
+        for address in list(login_failures):
+            attempts = login_failures[address]
+            while attempts and attempts[0] < cutoff:
+                attempts.popleft()
+            if not attempts and address != key:
+                del login_failures[address]
+        return len(login_failures[key]) >= maximum_login_failures()
 
 
 def record_login_failure(key):
@@ -507,6 +590,66 @@ def record_login_failure(key):
 def clear_login_failures(key):
     with login_lock:
         login_failures.pop(key, None)
+
+
+def service_snapshot():
+    """What the services are doing right now, for the settings screen."""
+    dashboard_host = "127.0.0.1" if RADIO_HOST in {"0.0.0.0", "::"} else RADIO_HOST
+    heartbeats = read_heartbeats()
+    return {
+        "host": RADIO_HOST,
+        "port": RADIO_PORT,
+        "dashboard_url": f"https://{dashboard_host}:{RADIO_PORT}",
+        "network_dashboard_url": (
+            f"https://{local_network_address()}:{RADIO_PORT}"
+            if RADIO_HOST in {"0.0.0.0", "::"}
+            else ""
+        ),
+        "engine": RADIO_ENGINE,
+        "model_size": RADIO_MODEL_SIZE,
+        "source_directory": RECORDING_SOURCE_DIR,
+        "components": {
+            name: {
+                "status": details.get("status"),
+                "last_seen": details.get("last_seen"),
+            }
+            for name, details in heartbeats.items()
+        },
+    }
+
+
+def local_network_address():
+    """Best-effort LAN address other devices can use to reach this Mac."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # No packets are sent; this only asks the routing table which local
+        # address would be used to reach the network.
+        probe.connect(("192.0.2.1", 9))
+        return probe.getsockname()[0]
+    except OSError:
+        return socket.gethostname()
+    finally:
+        probe.close()
+
+
+def schedule_service_restart(delay_seconds=2):
+    """Restart the supervisor from outside this process.
+
+    The dashboard is a child of the supervisor, so it cannot restart the group
+    itself; a detached helper does it a moment after the response is sent.
+    """
+    control_script = os.path.join(PROJECT_ROOT, "scripts", "service_control.py")
+    command = (
+        f"sleep {int(delay_seconds)}; "
+        f"exec {shlex.quote(sys.executable)} {shlex.quote(control_script)} restart"
+    )
+    subprocess.Popen(
+        ["/bin/sh", "-c", command],
+        cwd=PROJECT_ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
 
 
 def read_html(filename):
@@ -1291,10 +1434,11 @@ app.mount("/audio", StaticFiles(directory=AUDIO_DIR), name="audio")
 
 @app.get("/login")
 async def login_page(request: Request):
-    if setup_required():
-        return RedirectResponse("/setup", status_code=303)
+    # The native Mac app authenticates itself, so it is never shown this page.
     if get_session(request):
         return RedirectResponse("/", status_code=303)
+    if setup_required():
+        return RedirectResponse("/setup", status_code=303)
     return read_html("login.html")
 
 
@@ -1355,17 +1499,10 @@ async def initial_setup(payload: SetupPayload):
         status_code = 409 if "already been completed" in str(exc) else 400
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
     save_settings({"setup_step": 8, "setup_completed_at": datetime.now().isoformat()})
-    response = JSONResponse({"status": "success"})
-    response.set_cookie(
-        SESSION_COOKIE,
+    return set_session_cookie(
+        JSONResponse({"status": "success"}),
         create_session_token(user),
-        max_age=SESSION_SECONDS,
-        httponly=True,
-        secure=True,
-        samesite="strict",
-        path="/",
     )
-    return response
 
 
 @app.post("/api/login")
@@ -1373,7 +1510,10 @@ async def login(payload: LoginPayload, request: Request):
     key = client_key(request)
     if login_is_limited(key):
         return JSONResponse(
-            {"detail": "Too many failed attempts. Try again in 15 minutes."},
+            {
+                "detail": "Too many failed attempts. Try again in "
+                f"{login_window_seconds() // 60} minutes."
+            },
             status_code=429,
         )
     user = authenticate_user(payload.username, payload.password)
@@ -1381,17 +1521,10 @@ async def login(payload: LoginPayload, request: Request):
         record_login_failure(key)
         return JSONResponse({"detail": "Invalid username or password."}, status_code=401)
     clear_login_failures(key)
-    response = JSONResponse({"status": "success"})
-    response.set_cookie(
-        SESSION_COOKIE,
+    return set_session_cookie(
+        JSONResponse({"status": "success"}),
         create_session_token(user),
-        max_age=SESSION_SECONDS,
-        httponly=True,
-        secure=True,
-        samesite="strict",
-        path="/",
     )
-    return response
 
 
 @app.post("/api/logout")
@@ -1413,6 +1546,10 @@ def get_current_profile(request: Request):
         "username": session["u"],
         "display_name": session.get("display_name", session["u"]),
         "role": session["r"],
+        # "app" means this dashboard is running inside the native Mac app and
+        # signed itself in; the browser dashboard reports "session" instead.
+        "auth_source": session.get("via", "session"),
+        "setup_pending": setup_required(),
         "permissions": {
             "audio": role_allows(session, "operator"),
             "review": role_allows(session, "operator"),
@@ -1448,6 +1585,56 @@ def deployment_readiness(request: Request):
         if check["id"] == "administrator":
             check["ready"] = True
     return result
+
+
+@app.get("/api/settings")
+def get_settings(request: Request):
+    require_role(request, "admin")
+    document = settings_document()
+    document["service"] = service_snapshot()
+    return document
+
+
+@app.put("/api/settings")
+def update_settings(payload: SettingsPayload, request: Request):
+    session = require_role(request, "admin")
+    try:
+        result = apply_settings(payload.values)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit(
+        session["u"],
+        "settings.updated",
+        details={"keys": sorted(payload.values)},
+    )
+    document = settings_document()
+    document["service"] = service_snapshot()
+    document["restart_required"] = result["restart_required"]
+    document["warnings"] = result["warnings"]
+    return document
+
+
+@app.post("/api/settings/source-check")
+def check_source_folder(payload: SourceCheckPayload, request: Request):
+    require_role(request, "admin")
+    return validate_source(payload.path)
+
+
+@app.post("/api/services/restart")
+def restart_services(request: Request):
+    session = require_role(request, "admin")
+    audit(session["u"], "services.restart")
+    try:
+        schedule_service_restart()
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"The services could not be restarted: {exc}",
+        ) from exc
+    return {
+        "status": "restarting",
+        "detail": "Services are restarting. The dashboard reconnects automatically.",
+    }
 
 
 @app.get("/api/stats")
@@ -3689,6 +3876,10 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close(code=4403)
             return
     session = validate_session_token(websocket.cookies.get(SESSION_COOKIE))
+    if session is None:
+        session = app_session(
+            presented_app_key(websocket.headers, websocket.cookies)
+        )
     if session is None:
         await websocket.close(code=4401)
         return

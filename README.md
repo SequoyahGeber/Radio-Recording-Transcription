@@ -48,6 +48,13 @@ them with Whisper, and presents a secure live operations dashboard.
   bookmark, note, correction, feed, search, and audio actions.
 - Operators can inspect browser, server, transcription, and sync events in the
   resizable dashboard console with search, wrapping, copying, and diagnostics.
+- The Mac app signs itself in and never shows a login screen; browsers on other
+  devices still sign in with a username and password.
+- Browser sessions last a month by default and renew themselves while in use.
+- An administrator settings screen edits the recording source, transcription,
+  network, sign-in, storage, and retention values in one place.
+- Housekeeping runs continuously: scheduled verified backups, backup retention,
+  history pruning, log rotation and cleanup, and database checkpoints.
 - A native Mac launcher embeds the secure dashboard alongside service and folder controls.
 - Administrators can pause or resume transcription without stopping the dashboard or sync service.
 - Administrators can check GitHub Releases and install verified app updates in place.
@@ -76,6 +83,41 @@ Administrators can expand **App Controls** and choose **Stop Transcription** to
 leave the dashboard and recording sync available without running the
 transcription engine. The same control changes to **Start Transcription**, and
 the selected state persists across app restarts and updates.
+
+## Signing in
+
+Authentication applies to network access, not to this Mac. The app reads a
+private key from `security/security.json` — a file only the macOS account that
+runs the services can open — and presents it with every request, so opening the
+app goes straight to the dashboard with administrator clearance. A browser
+cannot read that file, so anyone reaching the dashboard from a browser signs in
+normally. Turn this off with **Sign in automatically in the Mac app** under
+**Settings → Network and sign-in** if the Mac is shared.
+
+Browser sign-ins last 30 days by default and are renewed whenever the dashboard
+is used, so an operator is not signed out mid-shift. Change the length under
+**Settings → Network and sign-in**.
+
+## Settings
+
+Administrators open **Settings** from the dashboard toolbar, or **Settings…**
+from the Mac app's menu bar or toolbar, which opens the same screen. It covers:
+
+- **Recording source** — folder, scan interval, settle time, live window,
+  backlog batch size, and SHA-256 verification.
+- **Transcription** — on/off, engine, first-pass model, CPU model size, and the
+  Large V3 rescue pass and its limits.
+- **Network and sign-in** — dashboard availability (this Mac or the local
+  network), port, automatic app sign-in, session length, and lockout policy.
+- **Storage and history** — free-space reserve, backup interval and retention,
+  live-update/audit/queue history retention, and log rotation size and retention.
+
+Values change immediately where that is possible: the recording folder, sync
+timings, storage reserve, retention windows, session length, and rescue limits
+all take effect within seconds without restarting anything. Changes that need a
+restart — the port, the engine, the model — say so and offer a restart button.
+A value set through an environment variable is displayed but locked, with the
+variable named, so the two can never disagree silently.
 
 ## Clearance profiles
 

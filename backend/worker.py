@@ -14,7 +14,15 @@ from watchdog.events import FileSystemEventHandler
 from faster_whisper import WhisperModel
 from faster_whisper.vad import VadOptions, get_speech_timestamps
 
-from backend.config import AUDIO_DIR, DB_NAME, MODEL_DIR, TLS_CA_CERT_PATH
+from backend.config import (
+    AUDIO_DIR,
+    DB_NAME,
+    MODEL_DIR,
+    TLS_CA_CERT_PATH,
+    bool_setting,
+    number_setting,
+    text_setting,
+)
 from backend.database import (
     connect,
     infer_channel,
@@ -48,8 +56,9 @@ from backend.transcript_quality import (
 
 # --- CONFIGURATION ---
 FOLDER_TO_WATCH = AUDIO_DIR
-MODEL_SIZE = os.environ.get("RADIO_MODEL_SIZE", "medium")
-REQUESTED_ENGINE = os.environ.get(
+MODEL_SIZE = text_setting("model_size", "RADIO_MODEL_SIZE", "medium")
+REQUESTED_ENGINE = text_setting(
+    "transcription_engine",
     "RADIO_TRANSCRIPTION_ENGINE",
     "mlx" if platform.system() == "Darwin" and platform.machine() == "arm64" else "faster-whisper",
 ).lower()
@@ -59,22 +68,47 @@ SERVER_URL = os.environ.get(
     "RADIO_SERVER_URL", "https://127.0.0.1:8000/api/new_transcript"
 )
 MAX_WORKERS = max(1, int(os.environ.get("RADIO_MAX_WORKERS", "1")))
-LIVE_WINDOW_SECONDS = max(
-    60, int(os.environ.get("RADIO_LIVE_WINDOW_MINUTES", "30")) * 60
+LIVE_WINDOW_SECONDS = 60 * number_setting(
+    "live_window_minutes", "RADIO_LIVE_WINDOW_MINUTES", 30, minimum=1, maximum=1440
 )
 
 MAX_RETRIES = 20
-MAX_RESCUE_RETRIES = max(0, int(os.environ.get("RADIO_MAX_RESCUE_RETRIES", "3")))
-MAX_RESCUE_BACKLOG = max(
-    1,
-    int(os.environ.get("RADIO_RESCUE_BACKLOG_LIMIT", "20")),
-)
 RETRY_DELAY = 10.0
 RECONCILE_SECONDS = max(60, int(os.environ.get("RADIO_RECONCILE_SECONDS", "300")))
-RETRY_MAX_DURATION = max(
-    15,
-    int(os.environ.get("RADIO_RETRY_MAX_DURATION_SECONDS", "180")),
-)
+
+
+# These are read on every use so an administrator can retune the rescue pass
+# from the settings screen without restarting the transcription worker.
+def rescue_is_enabled():
+    return bool_setting("rescue_enabled", default=True)
+
+
+def max_rescue_retries():
+    return number_setting(
+        "max_rescue_retries", "RADIO_MAX_RESCUE_RETRIES", 3, minimum=0, maximum=10
+    )
+
+
+def rescue_backlog_limit():
+    return number_setting(
+        "rescue_backlog_limit",
+        "RADIO_RESCUE_BACKLOG_LIMIT",
+        20,
+        minimum=1,
+        maximum=500,
+    )
+
+
+def rescue_max_duration():
+    return number_setting(
+        "rescue_max_duration_seconds",
+        "RADIO_RETRY_MAX_DURATION_SECONDS",
+        180,
+        minimum=15,
+        maximum=3600,
+    )
+
+
 VAD_OPTIONS = VadOptions(min_silence_duration_ms=500, speech_pad_ms=250)
 INTERNAL_TOKEN = load_security_config()["internal_token"]
 
@@ -350,7 +384,7 @@ def enqueue_file(
     queue_key = (task_type, rel_path)
     if task_type == "quality_retry":
         tier, recorded_timestamp = (2, recorded_at_for_file(rel_path).timestamp())
-        retry_limit = MAX_RESCUE_RETRIES + 1
+        retry_limit = max_rescue_retries() + 1
         requested_model = RETRY_MLX_MODEL
     else:
         tier, recorded_timestamp = priority_key or priority_for_file(rel_path)
@@ -404,33 +438,58 @@ def dispatch_due_jobs():
             )
         )
 
-def queue_existing_unprocessed_files():
-    print("[STARTUP] Checking for existing unprocessed audio files in all subfolders...")
-    with connect(read_only=True) as connection:
-        processed_files = {
-            row["filename"]
-            for row in connection.execute("SELECT filename FROM transcripts").fetchall()
-        }
+def unprocessed_paths(connection, relative_paths):
+    """Return the recordings in this batch that have no transcript yet."""
+    if not relative_paths:
+        return []
+    placeholders = ",".join("?" * len(relative_paths))
+    known = {
+        row["filename"]
+        for row in connection.execute(
+            f"SELECT filename FROM transcripts WHERE filename IN ({placeholders})",
+            relative_paths,
+        )
+    }
+    return [path for path in relative_paths if path not in known]
 
+
+def queue_existing_unprocessed_files(batch_size=500):
+    """Queue any recording on disk that has never produced a transcript.
+
+    Recordings are checked in batches rather than by loading every processed
+    filename into memory, so an archive with hundreds of thousands of files
+    costs the same as a small one on each reconciliation pass.
+    """
     queued_count = 0
-    for root, dirs, files in os.walk(FOLDER_TO_WATCH):
-        for filename in sorted(files):
-            if filename.lower().endswith((".mp3", ".wav", ".m4a")):
+    batch = []
+    with connect(read_only=True) as connection:
+        def flush(paths):
+            queued = 0
+            for rel_path in unprocessed_paths(connection, paths):
+                if enqueue_file(os.path.join(FOLDER_TO_WATCH, rel_path), rel_path):
+                    queued += 1
+            return queued
+
+        for root, _, files in os.walk(FOLDER_TO_WATCH):
+            for filename in sorted(files):
+                if not filename.lower().endswith((".mp3", ".wav", ".m4a")):
+                    continue
                 filepath = os.path.join(root, filename)
-                rel_path = os.path.relpath(filepath, FOLDER_TO_WATCH).replace("\\", "/")
-                
-                if rel_path not in processed_files:
-                    if enqueue_file(filepath, rel_path):
-                        queued_count += 1
-                
+                batch.append(
+                    os.path.relpath(filepath, FOLDER_TO_WATCH).replace("\\", "/")
+                )
+                if len(batch) >= batch_size:
+                    queued_count += flush(batch)
+                    batch = []
+        queued_count += flush(batch)
+
     if queued_count > 0:
-        print(f"[STARTUP] Successfully queued {queued_count} old/missed files.\n")
-    else:
-        print("[STARTUP] No backlog found. We are fully caught up.\n")
+        print(f"[RECONCILE] Queued {queued_count} recording(s) that had no transcript.")
+    return queued_count
 
 
 def queue_existing_quality_retries():
-    if active_engine != "mlx":
+    if active_engine != "mlx" or not rescue_is_enabled():
         return
     with connect(read_only=True) as connection:
         rows = connection.execute(
@@ -444,7 +503,7 @@ def queue_existing_quality_retries():
             ORDER BY coalesce(recorded_at, timestamp) DESC, id DESC
             LIMIT ?
             """,
-            (MAX_RESCUE_BACKLOG,),
+            (rescue_backlog_limit(),),
         ).fetchall()
 
     queued_count = 0
@@ -461,7 +520,7 @@ def queue_existing_quality_retries():
         }
         if not should_retry_with_larger_model(
             quality,
-            max_duration=RETRY_MAX_DURATION,
+            max_duration=rescue_max_duration(),
         ):
             continue
         rel_path = row["filename"]
@@ -749,10 +808,11 @@ def process_task(item):
             if (
                 inserted
                 and active_engine == "mlx"
+                and rescue_is_enabled()
                 and should_retry_with_larger_model(
                     quality,
                     audio_duration,
-                    RETRY_MAX_DURATION,
+                    rescue_max_duration(),
                 )
             ):
                 retry_trigger = explain_retry_trigger(quality)
@@ -806,7 +866,7 @@ def process_task(item):
             os._exit(1) 
             
         retry_limit = (
-            MAX_RESCUE_RETRIES
+            max_rescue_retries()
             if task_type == "quality_retry"
             else MAX_RETRIES
         )
@@ -832,10 +892,26 @@ def process_task(item):
 def transcription_worker():
     while True:
         item = transcription_queue.get()
-        process_task(item)
+        try:
+            process_task(item)
+        except Exception as exc:
+            # process_task handles its own failures; anything escaping it would
+            # otherwise end this thread and stop transcription silently until
+            # somebody noticed and restarted the service.
+            print(f"[QUEUE] Worker recovered from an unexpected failure: {exc}")
+            try:
+                with queue_lock:
+                    queued_files.discard((item[3], item[5]))
+            except (IndexError, TypeError):
+                pass
+            try:
+                transcription_queue.task_done()
+            except ValueError:
+                pass
 
 
 def deliver_pending_transcripts():
+    failures = 0
     while True:
         rows = []
         try:
@@ -885,11 +961,26 @@ def deliver_pending_transcripts():
                             (str(exc)[:500], row["id"]),
                         )
                         connection.commit()
-                    print(f"[DELIVERY] Dashboard unavailable; will retry: {exc}")
+                    failures += 1
+                    if failures in (1, 5) or failures % 30 == 0:
+                        # A dashboard that is down for hours must not fill the
+                        # log with one line every couple of seconds.
+                        print(
+                            f"[DELIVERY] Dashboard unavailable; will keep retrying "
+                            f"(attempt {failures}): {exc}"
+                        )
                     break
+            else:
+                failures = 0
         except Exception as exc:
+            failures += 1
             print(f"[DELIVERY] Retry loop error: {exc}")
-        time.sleep(2 if rows else 5)
+        if failures:
+            # Back off to at most a minute between attempts while the dashboard
+            # is unreachable, then resume immediately once it answers.
+            time.sleep(min(60, 2 ** min(failures, 6)))
+        else:
+            time.sleep(2 if rows else 5)
 
 
 def heartbeat_worker():
@@ -926,7 +1017,13 @@ class AudioFileHandler(FileSystemEventHandler):
         src_path = os.fsdecode(event_path)
         if src_path.lower().endswith((".mp3", ".wav", ".m4a")):
             rel_path = os.path.relpath(src_path, FOLDER_TO_WATCH).replace("\\", "/")
-            enqueue_file(src_path, rel_path)
+            try:
+                enqueue_file(src_path, rel_path)
+            except Exception as exc:
+                # A failure here runs on the watchdog's own thread. Letting it
+                # escape stops file watching entirely; the periodic
+                # reconciliation pass picks the recording up instead.
+                print(f"[WATCHDOG] Could not queue {rel_path}: {exc}")
 
     def on_created(self, event):
         if not event.is_directory:
@@ -939,8 +1036,14 @@ class AudioFileHandler(FileSystemEventHandler):
 def periodic_reconciliation():
     while True:
         time.sleep(RECONCILE_SECONDS)
-        queue_existing_unprocessed_files()
-        queue_existing_quality_retries()
+        try:
+            queue_existing_unprocessed_files()
+            queue_existing_quality_retries()
+        except Exception as exc:
+            # Reconciliation is the safety net that catches recordings the file
+            # watcher missed, so it has to survive a transient database or disk
+            # error rather than ending its thread.
+            print(f"[RECONCILE] Pass failed, will try again: {exc}")
 
 
 def durable_job_dispatcher():
@@ -968,9 +1071,14 @@ def run_service():
         Thread(target=background, daemon=True).start()
 
     event_handler = AudioFileHandler()
-    observer = Observer()
-    observer.schedule(event_handler, FOLDER_TO_WATCH, recursive=True)
-    observer.start()
+
+    def start_observer():
+        watcher = Observer()
+        watcher.schedule(event_handler, FOLDER_TO_WATCH, recursive=True)
+        watcher.start()
+        return watcher
+
+    observer = start_observer()
 
     print(f"WATCHDOG ONLINE: Monitoring '{FOLDER_TO_WATCH}' and all subfolders.")
     print("Press Ctrl+C to stop the system.\n")
@@ -978,6 +1086,21 @@ def run_service():
     try:
         while True:
             time.sleep(1)
+            if not observer.is_alive():
+                # The macOS file-system watcher can die on its own - a volume
+                # disappearing is enough. Rebuild it instead of running blind
+                # until somebody restarts the service.
+                print("[WATCHDOG] File watcher stopped; restarting it.")
+                try:
+                    observer.stop()
+                    observer.join(timeout=5)
+                except Exception:
+                    pass
+                try:
+                    observer = start_observer()
+                except Exception as exc:
+                    print(f"[WATCHDOG] Could not restart the file watcher: {exc}")
+                    time.sleep(10)
     except KeyboardInterrupt:
         print("\nShutting down Watchdog...")
         observer.stop()

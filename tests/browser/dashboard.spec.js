@@ -2,6 +2,7 @@ const { test, expect } = require("@playwright/test");
 
 const TEST_USERNAME = "phase0-admin";
 const TEST_PASSWORD = "phase0-browser-password";
+const TEST_APP_KEY = "phase0-native-app-key-for-browser-tests";
 
 async function signIn(page, viewport = { width: 1440, height: 900 }) {
   await page.setViewportSize(viewport);
@@ -655,4 +656,99 @@ test("export count matches the complete streamed CSV", async ({ page }) => {
   expect(exported.headerCount).toBe(exported.count);
   expect(exported.headerThroughId).toBe(exported.throughId);
   expect(exported.csv.trim().split("\n")).toHaveLength(exported.count + 1);
+});
+
+test("settings screen edits real values and reports what needs a restart", async ({
+  page,
+}) => {
+  await signIn(page);
+
+  await page.locator("#settings-button").click();
+  const settings = page.locator("#settings-modal");
+  await expect(settings).toBeVisible();
+  await expect(settings.getByRole("heading", { name: "Settings" })).toBeVisible();
+
+  // Every declared group is reachable and shows real controls, not placeholders.
+  for (const group of [
+    "Recording source",
+    "Transcription",
+    "Network and sign-in",
+    "Storage and history",
+  ]) {
+    await settings.getByRole("button", { name: group, exact: true }).click();
+    await expect(settings.locator(".settings-panel:visible .settings-field")).not.toHaveCount(
+      0,
+    );
+  }
+
+  await settings.getByRole("button", { name: "Recording source", exact: true }).click();
+  const scanInterval = settings.locator("#setting-sync_poll_seconds");
+  await expect(scanInterval).toHaveValue("15");
+  await scanInterval.fill("22");
+  const save = page.locator("#settings-save");
+  await expect(save).toBeEnabled();
+  await save.click();
+  await expect(page.locator("#settings-status")).toHaveText(/Settings saved/);
+  await expect(scanInterval).toHaveValue("22");
+
+  // A value pinned by an environment variable is shown, but not editable.
+  await settings.getByRole("button", { name: "Network and sign-in", exact: true }).click();
+  await expect(settings.locator("#setting-port")).toBeDisabled();
+  await expect(
+    settings.locator('[data-setting-field="port"] .settings-note'),
+  ).toContainText("RADIO_PORT");
+
+  // A value that needs a restart says so instead of pretending it applied.
+  await settings.getByRole("button", { name: "Transcription", exact: true }).click();
+  await settings
+    .locator("#setting-mlx_primary_model")
+    .selectOption("mlx-community/whisper-large-v3-mlx");
+  await page.locator("#settings-save").click();
+  await expect(page.locator("#settings-restart-banner")).toBeVisible();
+  await settings.getByRole("button", { name: "Transcription", exact: true }).click();
+  await settings
+    .locator("#setting-mlx_primary_model")
+    .selectOption("mlx-community/whisper-medium-mlx");
+  await page.locator("#settings-save").click();
+  await expect(page.locator("#settings-status")).toHaveText(/Settings saved/);
+
+  // Out-of-range input is refused with the reason, not silently clamped.
+  await settings.getByRole("button", { name: "Storage and history", exact: true }).click();
+  await settings.locator("#setting-backup_retention_count").fill("500");
+  await page.locator("#settings-save").click();
+  await expect(page.locator("#settings-status")).toHaveText(/at most 90/);
+
+  await settings.getByRole("button", { name: "System", exact: true }).click();
+  await expect(settings.getByText("Archive database")).toBeVisible();
+  await expect(settings.getByText("Recordings stored in")).toBeVisible();
+
+  await page.locator("#settings-close").click();
+  await expect(settings).toBeHidden();
+});
+
+test("the dashboard signs itself in when it carries the Mac app key", async ({
+  browser,
+  baseURL,
+}) => {
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await context.newPage();
+
+  // The fixture writes this key into its security file, exactly as the real
+  // installation does; only a process that can read that file knows it.
+  await context.addCookies([
+    {
+      name: "radio_app_key",
+      value: TEST_APP_KEY,
+      url: `${baseURL}/`,
+      secure: true,
+    },
+  ]);
+
+  // The app never sees the login page, and it acts as an administrator.
+  await page.goto("/login");
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.locator("#current-profile")).toContainText("this Mac");
+  await expect(page.locator("#logout-button")).toBeHidden();
+  await expect(page.locator("#settings-button")).toBeVisible();
+  await context.close();
 });

@@ -16,6 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_MARKER = ".radio-command-center-browser-fixture"
 TEST_USERNAME = "phase0-admin"
 TEST_PASSWORD = "phase0-browser-password"
+TEST_APP_KEY = "phase0-native-app-key-for-browser-tests"
 CHANNELS = (
     "Dispatch",
     "Medical",
@@ -114,6 +115,8 @@ def create_fixture(root, transcript_count=176):
             ],
             "session_secret": secrets.token_urlsafe(48),
             "internal_token": "phase-zero-internal-token",
+            # Stands in for the key the native Mac app reads from disk.
+            "app_key": TEST_APP_KEY,
         }
     )
 

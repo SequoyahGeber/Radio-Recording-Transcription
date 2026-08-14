@@ -8,13 +8,21 @@ import threading
 import time
 import tempfile
 
-from backend.config import SECURITY_CONFIG_PATH
+from backend.config import SECURITY_CONFIG_PATH, bool_setting, number_setting
 
 
 SESSION_COOKIE = "radio_session"
-SESSION_SECONDS = 12 * 60 * 60
-_config_lock = threading.Lock()
+# Browser sessions last a month by default and renew themselves while the
+# dashboard is in use, so an operator is not signed out mid-shift.
+SESSION_SECONDS = 30 * 24 * 60 * 60
+MINIMUM_SESSION_SECONDS = 60 * 60
+APP_KEY_COOKIE = "radio_app_key"
+APP_KEY_HEADER = "X-Radio-App-Key"
+BUILTIN_APP_USERNAME = "mac-app"
+BUILTIN_APP_DISPLAY_NAME = "This Mac"
+_config_lock = threading.RLock()
 _setup_lock = threading.Lock()
+_app_key_lock = threading.Lock()
 _config_cache = None
 _config_mtime = None
 ROLE_LEVELS = {
@@ -23,6 +31,17 @@ ROLE_LEVELS = {
     "supervisor": 3,
     "admin": 4,
 }
+
+
+def session_lifetime_seconds():
+    hours = number_setting(
+        "session_lifetime_hours",
+        "RADIO_SESSION_LIFETIME_HOURS",
+        default=SESSION_SECONDS // 3600,
+        minimum=1,
+        maximum=24 * 3650,
+    )
+    return max(MINIMUM_SESSION_SECONDS, hours * 3600)
 
 
 def _decode(value):
@@ -149,14 +168,15 @@ def verify_password(username, password):
     return authenticate_user(username, password) is not None
 
 
-def create_session_token(user):
+def create_session_token(user, lifetime_seconds=None):
     config = load_security_config()
     if isinstance(user, str):
         user = find_user(user) or {"username": user, "role": "viewer"}
+    lifetime = int(lifetime_seconds or session_lifetime_seconds())
     payload = {
         "u": user["username"],
         "r": user.get("role", "viewer"),
-        "exp": int(time.time()) + SESSION_SECONDS,
+        "exp": int(time.time()) + lifetime,
         "n": secrets.token_urlsafe(12),
     }
     encoded_payload = _encode(
@@ -194,6 +214,83 @@ def validate_session_token(token):
         return payload
     except (ValueError, TypeError, KeyError, json.JSONDecodeError):
         return None
+
+
+def app_sign_in_enabled():
+    """Whether the native Mac app may sign itself in without a password."""
+    return bool_setting("app_auto_sign_in", "RADIO_APP_AUTO_SIGN_IN", default=True)
+
+
+def ensure_app_key():
+    """Return the native app's private key, creating it on first use.
+
+    The key lives in security.json, which is readable only by the Mac account
+    that runs the services. The native app reads it directly from disk, so the
+    app can authenticate itself without ever prompting for a password, while a
+    browser - which cannot read that file - still has to sign in normally.
+    """
+    with _app_key_lock:
+        config = load_security_config()
+        existing = config.get("app_key")
+        if isinstance(existing, str) and len(existing) >= 32:
+            return existing
+        key = secrets.token_urlsafe(32)
+        config["app_key"] = key
+        save_security_config(config)
+        return key
+
+
+def app_key_matches(candidate):
+    if not candidate or not app_sign_in_enabled():
+        return False
+    try:
+        expected = load_security_config().get("app_key")
+    except RuntimeError:
+        return False
+    if not isinstance(expected, str) or not expected:
+        return False
+    return hmac.compare_digest(str(candidate).encode("utf-8"), expected.encode("utf-8"))
+
+
+def app_identity():
+    """The profile the native Mac app acts as.
+
+    It prefers the administrator recorded as the app owner, then any active
+    administrator, and finally a built-in local identity so a brand new
+    installation is usable in the app before any profile exists.
+    """
+    config = load_security_config()
+    users = _configured_users(config)
+    administrators = [
+        user
+        for user in users
+        if user.get("active", True) and user.get("role") == "admin"
+    ]
+    preferred = config.get("app_user")
+    for user in administrators:
+        if user.get("username") == preferred:
+            return user
+    if administrators:
+        return administrators[0]
+    return {
+        "username": BUILTIN_APP_USERNAME,
+        "display_name": BUILTIN_APP_DISPLAY_NAME,
+        "role": "admin",
+        "active": True,
+    }
+
+
+def app_session(candidate_key):
+    """Build a session for a request that carries the native app's key."""
+    if not app_key_matches(candidate_key):
+        return None
+    identity = app_identity()
+    return {
+        "u": identity["username"],
+        "r": "admin",
+        "display_name": identity.get("display_name") or identity["username"],
+        "via": "app",
+    }
 
 
 def verify_internal_token(candidate):

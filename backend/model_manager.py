@@ -4,12 +4,16 @@ import time
 from huggingface_hub import snapshot_download, try_to_load_from_cache
 from tqdm.auto import tqdm
 
+from backend.config import text_setting
 
-PRIMARY_MLX_MODEL = os.environ.get(
+
+PRIMARY_MLX_MODEL = text_setting(
+    "mlx_primary_model",
     "RADIO_MLX_MODEL",
     "mlx-community/whisper-medium-mlx",
 )
-RETRY_MLX_MODEL = os.environ.get(
+RETRY_MLX_MODEL = text_setting(
+    "mlx_retry_model",
     "RADIO_RETRY_MLX_MODEL",
     "mlx-community/whisper-large-v3-mlx",
 )

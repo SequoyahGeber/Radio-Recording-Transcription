@@ -41,7 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var updateCheckInFlight = false
     private var automaticUpdateChecked = false
     private var transcriptionEnabled = true
-    private var settingsWindow: NSWindow?
+    private var settingsRequested = false
     private var menuStatusItem: NSStatusItem?
     private let collapsedHeaderHeight: CGFloat = 46
     private let expandedHeaderHeight: CGFloat = 104
@@ -205,6 +205,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.userContentController.add(self, name: "profileAccess")
+        configuration.userContentController.add(self, name: "nativeAction")
         webView = WKWebView(
             frame: NSRect(
                 x: 0,
@@ -403,40 +404,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         webView.evaluateJavaScript("document.getElementById('health-center-button')?.click()")
     }
 
+    /// Settings live in the dashboard itself so the app, a browser on this Mac,
+    /// and a browser on another device all edit exactly the same values.
     @objc private func showSettings() {
-        if let settingsWindow {
-            settingsWindow.makeKeyAndOrderFront(nil)
+        showMainWindow()
+        guard dashboardLoaded else {
+            settingsRequested = true
+            statusLabel.stringValue = "Starting services to open settings…"
+            startServices()
             return
         }
-        let panel = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 680, height: 430),
-            styleMask: [.titled, .closable], backing: .buffered, defer: false
-        )
-        panel.title = "Radio Command Center Settings"
-        panel.isReleasedWhenClosed = false
-        let tabs = NSTabView(frame: NSRect(x: 16, y: 16, width: 648, height: 398))
-        for (name, text) in [
-            ("Source", "Choose and validate the local or mounted recording source."),
-            ("Models", "Medium and Large V3 readiness and download progress are available in Dashboard Controls."),
-            ("Network", "The dashboard address and certificate trust remain managed by the secure local service."),
-            ("Storage", "Backups, restore drills, storage reserve, and diagnostics are available to administrators."),
-            ("Users", "Create viewer, operator, supervisor, and administrator profiles in Dashboard Controls."),
-            ("Updates", "Updates are verified before installation and retain a rollback copy."),
-        ] {
-            let tab = NSTabViewItem(identifier: name)
-            tab.label = name
-            let view = NSView(frame: tabs.contentRect)
-            let description = label(text, size: 13)
-            description.frame = NSRect(x: 22, y: 250, width: 560, height: 60)
-            description.maximumNumberOfLines = 3
-            view.addSubview(description)
-            tab.view = view
-            tabs.addTabViewItem(tab)
+        settingsRequested = false
+        webView.evaluateJavaScript("window.radioOpenSettings && window.radioOpenSettings()") {
+            [weak self] _, error in
+            guard let self, error != nil else { return }
+            self.statusLabel.stringValue = "Settings are available once the dashboard loads"
         }
-        panel.contentView?.addSubview(tabs)
-        panel.center()
-        settingsWindow = panel
-        panel.makeKeyAndOrderFront(nil)
+    }
+
+    private func chooseSourceFolderForDashboard() {
+        let chooser = NSOpenPanel()
+        chooser.title = "Choose Recording Source"
+        chooser.message = "Choose the local folder or mounted share that contains radio recordings."
+        chooser.prompt = "Use Recording Folder"
+        chooser.canChooseFiles = false
+        chooser.canChooseDirectories = true
+        chooser.allowsMultipleSelection = false
+        chooser.canCreateDirectories = false
+        guard chooser.runModal() == .OK, let folder = chooser.url else { return }
+        let encoded = String(
+            data: (try? JSONSerialization.data(withJSONObject: [folder.path]))
+                ?? Data("[\"\"]".utf8),
+            encoding: .utf8
+        ) ?? "[\"\"]"
+        webView.evaluateJavaScript(
+            "window.radioApplySourceFolder && window.radioApplySourceFolder(\(encoded)[0])"
+        )
     }
 
     private func runControl(_ arguments: [String], completion: @escaping ([String: Any]?) -> Void) {
@@ -803,11 +806,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
     }
 
+    /// The app's private sign-in key, stored beside the dashboard's own
+    /// credentials. Only this macOS account can read the file, which is what
+    /// lets the app skip the login screen while browsers still sign in.
+    private func applicationSignInKey() -> String? {
+        let settingsURL = applicationDataURL.appendingPathComponent("settings.json")
+        var securityDirectory = applicationDataURL.appendingPathComponent(
+            "security",
+            isDirectory: true
+        )
+        if
+            let data = try? Data(contentsOf: settingsURL),
+            let settings = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let configured = settings["security_dir"] as? String,
+            !configured.isEmpty
+        {
+            securityDirectory = URL(fileURLWithPath: configured, isDirectory: true)
+        }
+        let securityURL = securityDirectory.appendingPathComponent("security.json")
+        guard
+            let data = try? Data(contentsOf: securityURL),
+            let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let key = value["app_key"] as? String,
+            !key.isEmpty
+        else { return nil }
+        return key
+    }
+
+    private func installSignInKey(for url: URL, completion: @escaping () -> Void) {
+        guard let host = url.host, let key = applicationSignInKey() else {
+            completion()
+            return
+        }
+        var properties: [HTTPCookiePropertyKey: Any] = [
+            .domain: host,
+            .path: "/",
+            .name: "radio_app_key",
+            .value: key,
+            .secure: "TRUE",
+            .expires: Date(timeIntervalSinceNow: 60 * 60 * 24 * 3650),
+        ]
+        if #available(macOS 10.15, *) {
+            properties[.sameSitePolicy] = HTTPCookieStringPolicy.sameSiteStrict
+        }
+        guard let cookie = HTTPCookie(properties: properties) else {
+            completion()
+            return
+        }
+        webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) {
+            completion()
+        }
+    }
+
     private func loadDashboardIfNeeded(force: Bool = false) {
         guard let dashboardURL else { return }
         if !force && (dashboardLoaded || dashboardLoadInProgress) { return }
         dashboardLoadInProgress = true
-        webView.load(URLRequest(url: dashboardURL, cachePolicy: .reloadIgnoringLocalCacheData))
+        installSignInKey(for: dashboardURL) { [weak self] in
+            guard let self else { return }
+            self.webView.load(
+                URLRequest(url: dashboardURL, cachePolicy: .reloadIgnoringLocalCacheData)
+            )
+        }
     }
 
     private func showServicePlaceholder() {
@@ -1200,12 +1260,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             appHeaderToggleButton.isHidden = true
             setAppHeaderExpanded(false, animated: false)
         }
+        if settingsRequested && dashboardLoaded && webView.url?.path == "/" {
+            showSettings()
+        }
     }
 
     func userContentController(
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
+        if message.name == "nativeAction" {
+            guard
+                message.frameInfo.isMainFrame,
+                let payload = message.body as? [String: Any],
+                payload["action"] as? String == "chooseSourceFolder"
+            else { return }
+            chooseSourceFolderForDashboard()
+            return
+        }
         guard
             message.name == "profileAccess",
             message.frameInfo.isMainFrame,
@@ -1266,10 +1338,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         for navigationAction: WKNavigationAction,
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
+        // Anything outside the local dashboard opens in the user's browser, so
+        // the window holding the app's sign-in key only ever shows the dashboard.
         if let requestURL = navigationAction.request.url {
-            webView.load(URLRequest(url: requestURL))
+            if requestURL.host == dashboardURL?.host {
+                webView.load(URLRequest(url: requestURL))
+            } else {
+                NSWorkspace.shared.open(requestURL)
+            }
         }
         return nil
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        guard let requestURL = navigationAction.request.url else {
+            decisionHandler(.allow)
+            return
+        }
+        let scheme = requestURL.scheme?.lowercased() ?? ""
+        if scheme == "about" || requestURL.host == dashboardURL?.host {
+            decisionHandler(.allow)
+            return
+        }
+        if scheme == "http" || scheme == "https" {
+            NSWorkspace.shared.open(requestURL)
+        }
+        decisionHandler(.cancel)
     }
 }
 

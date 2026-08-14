@@ -4,6 +4,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 
@@ -23,30 +24,39 @@ from backend.config import (
     RUNTIME_DIR,
     TLS_CERT_PATH,
     TLS_KEY_PATH,
-    load_settings,
+    live_settings,
+    number_setting,
 )
 
 
 PID_PATH = os.path.join(RUNTIME_DIR, "supervisor.pid")
 STATUS_PATH = os.path.join(RUNTIME_DIR, "service-status.json")
 STOPPING = False
-MAX_LOG_BYTES = 10 * 1024 * 1024
+DEFAULT_MAX_LOG_BYTES = 10 * 1024 * 1024
+KEPT_LOG_GENERATIONS = 3
+
+
+def max_log_bytes():
+    megabytes = number_setting(
+        "log_max_megabytes",
+        default=DEFAULT_MAX_LOG_BYTES // (1024 * 1024),
+        minimum=1,
+        maximum=1024,
+    )
+    return megabytes * 1024 * 1024
 
 
 def rotate_log(path):
-    try:
-        if os.path.getsize(path) < MAX_LOG_BYTES:
-            return
-    except OSError:
-        return
-    oldest = f"{path}.3"
+    """Move a full log aside, keeping a few previous generations."""
+    oldest = f"{path}.{KEPT_LOG_GENERATIONS}"
     if os.path.exists(oldest):
         os.unlink(oldest)
-    for index in (2, 1):
+    for index in range(KEPT_LOG_GENERATIONS - 1, 0, -1):
         source = f"{path}.{index}"
         if os.path.exists(source):
             os.replace(source, f"{path}.{index + 1}")
-    os.replace(path, f"{path}.1")
+    if os.path.exists(path):
+        os.replace(path, f"{path}.1")
 
 
 def write_pid():
@@ -99,7 +109,7 @@ def remove_status():
 
 
 def transcription_is_enabled():
-    return bool(load_settings().get("transcription_enabled", True))
+    return bool(live_settings().get("transcription_enabled", True))
 
 
 def handle_signal(signum, frame):
@@ -109,15 +119,27 @@ def handle_signal(signum, frame):
 
 
 class ManagedProcess:
+    """One supervised service, with its output written to a rotating log.
+
+    The supervisor reads each child's output itself rather than handing the
+    child a file descriptor. That is what makes rotation possible while the
+    service keeps running, so an installation left on for months cannot fill
+    the disk with a single enormous log file.
+    """
+
     def __init__(self, name, command, environment):
         self.name = name
         self.command = command
         self.environment = environment
+        self.log_path = os.path.join(LOG_DIR, f"{name}.log")
         self.process = None
         self.failure_count = 0
         self.next_start = 0
         self.started_at = 0
         self.log_handle = None
+        self.log_bytes = 0
+        self.log_lock = threading.Lock()
+        self.reader = None
 
     @property
     def running(self):
@@ -127,20 +149,64 @@ class ManagedProcess:
     def pid(self):
         return self.process.pid if self.running else None
 
+    def _open_log(self):
+        os.makedirs(LOG_DIR, exist_ok=True)
+        self.log_handle = open(self.log_path, "a", encoding="utf-8", buffering=1)
+        try:
+            self.log_bytes = os.path.getsize(self.log_path)
+        except OSError:
+            self.log_bytes = 0
+
+    def write_log(self, text):
+        with self.log_lock:
+            if self.log_handle is None:
+                self._open_log()
+            if self.log_bytes >= max_log_bytes():
+                self.log_handle.close()
+                try:
+                    rotate_log(self.log_path)
+                except OSError:
+                    pass
+                self._open_log()
+            try:
+                self.log_handle.write(text)
+                self.log_bytes += len(text)
+            except (OSError, ValueError):
+                self.log_handle = None
+
+    def _pump_output(self, stream):
+        try:
+            for line in stream:
+                self.write_log(line)
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+
     def start(self):
-        log_path = os.path.join(LOG_DIR, f"{self.name}.log")
-        rotate_log(log_path)
-        self.log_handle = open(log_path, "a", encoding="utf-8", buffering=1)
-        self.log_handle.write(
+        self.write_log(
             f"\n[{datetime.now().isoformat()}] Starting {' '.join(self.command)}\n"
         )
         self.process = subprocess.Popen(
             self.command,
             cwd=PROJECT_ROOT,
             env=self.environment,
-            stdout=self.log_handle,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            bufsize=1,
         )
+        self.reader = threading.Thread(
+            target=self._pump_output,
+            args=(self.process.stdout,),
+            name=f"{self.name}-log",
+            daemon=True,
+        )
+        self.reader.start()
         self.started_at = time.monotonic()
 
     def poll_and_restart_if_needed(self):
@@ -153,12 +219,9 @@ class ManagedProcess:
             if time.monotonic() - self.started_at > 120:
                 self.failure_count = 0
             return
-        if self.log_handle:
-            self.log_handle.write(
-                f"[{datetime.now().isoformat()}] Exited with status {return_code}\n"
-            )
-            self.log_handle.close()
-            self.log_handle = None
+        self.write_log(
+            f"[{datetime.now().isoformat()}] Exited with status {return_code}\n"
+        )
         self.process = None
         self.failure_count += 1
         delay = min(60, 2 ** min(self.failure_count, 6))
@@ -174,9 +237,13 @@ class ManagedProcess:
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait(timeout=5)
-        if self.log_handle:
-            self.log_handle.close()
-            self.log_handle = None
+        if self.reader is not None:
+            self.reader.join(timeout=5)
+            self.reader = None
+        with self.log_lock:
+            if self.log_handle:
+                self.log_handle.close()
+                self.log_handle = None
         self.process = None
         self.failure_count = 0
         self.next_start = 0
@@ -208,19 +275,14 @@ def main():
         check=True,
     )
 
+    # Only values that are not administrator settings are injected here. Engine,
+    # model, host, and port all come from settings.json by way of backend.config,
+    # so the settings screen can change them instead of an environment variable
+    # silently overriding whatever the administrator chose.
     environment = dict(os.environ)
-    environment["RADIO_HOST"] = RADIO_HOST
-    environment["RADIO_PORT"] = str(RADIO_PORT)
     environment.setdefault("PYTHONUNBUFFERED", "1")
-    environment.setdefault("RADIO_TRANSCRIPTION_ENGINE", "mlx")
-    environment.setdefault("RADIO_MODEL_SIZE", "medium")
     environment.setdefault("RADIO_MODEL_DIR", MODEL_DIR)
     environment.setdefault("HF_HOME", os.path.join(MODEL_DIR, "hf-mlx"))
-    environment.setdefault("RADIO_MLX_MODEL", "mlx-community/whisper-medium-mlx")
-    environment.setdefault(
-        "RADIO_RETRY_MLX_MODEL",
-        "mlx-community/whisper-large-v3-mlx",
-    )
     worker_host = "127.0.0.1" if RADIO_HOST in {"0.0.0.0", "::"} else RADIO_HOST
     environment.setdefault(
         "RADIO_SERVER_URL",

@@ -25,10 +25,20 @@ os.environ["RADIO_AUDIO_DIR"] = AUDIO_DIR
 os.environ["RADIO_DB_PATH"] = os.path.join(DATA_DIR, "api.db")
 os.environ["RADIO_HOST"] = "127.0.0.1"
 
+from datetime import datetime, timedelta
+
 from fastapi.testclient import TestClient
-from backend.config import LOG_DIR
+from backend.config import LOG_DIR, load_settings, save_settings
 from backend.database import connect
-from backend.security import hash_password, load_security_config, save_security_config
+from backend.maintenance import prune_history
+from backend.security import (
+    create_session_token,
+    ensure_app_key,
+    find_user,
+    hash_password,
+    load_security_config,
+    save_security_config,
+)
 
 
 salt, password_digest = hash_password("admin-password")
@@ -1659,6 +1669,241 @@ class ApiIntegrationTests(unittest.TestCase):
             },
         )
         self.assertEqual(gated.status_code, 400)
+
+
+class NativeAppSignInTests(unittest.TestCase):
+    """The Mac app signs itself in with a key only this account can read."""
+
+    def setUp(self):
+        self.client = TestClient(app, base_url="https://127.0.0.1")
+        self.app_key = ensure_app_key()
+
+    def test_app_key_is_accepted_without_any_password(self):
+        response = self.client.get(
+            "/api/me", cookies={"radio_app_key": self.app_key}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["auth_source"], "app")
+        self.assertEqual(response.json()["role"], "admin")
+
+    def test_browser_without_the_key_still_has_to_sign_in(self):
+        self.assertEqual(self.client.get("/api/me").status_code, 401)
+        self.assertEqual(
+            self.client.get("/api/me", cookies={"radio_app_key": "wrong"}).status_code,
+            401,
+        )
+
+    def test_cross_site_requests_may_not_borrow_the_key(self):
+        response = self.client.get(
+            "/api/me",
+            cookies={"radio_app_key": self.app_key},
+            headers={"Sec-Fetch-Site": "cross-site"},
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_the_app_is_never_shown_the_login_page(self):
+        response = self.client.get(
+            "/login",
+            cookies={"radio_app_key": self.app_key},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/")
+
+    def test_automatic_sign_in_can_be_switched_off(self):
+        save_settings({"app_auto_sign_in": False})
+        try:
+            response = self.client.get(
+                "/api/me", cookies={"radio_app_key": self.app_key}
+            )
+            self.assertEqual(response.status_code, 401)
+        finally:
+            save_settings({"app_auto_sign_in": True})
+
+
+class SessionLifetimeTests(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app, base_url="https://127.0.0.1")
+
+    def test_signing_in_issues_a_long_lived_cookie(self):
+        response = self.client.post(
+            "/api/login",
+            json={"username": "admin", "password": "admin-password"},
+        )
+        self.assertEqual(response.status_code, 200)
+        cookie_header = response.headers["set-cookie"]
+        self.assertIn("Max-Age=", cookie_header)
+        max_age = int(cookie_header.split("Max-Age=")[1].split(";")[0])
+        self.assertGreaterEqual(max_age, 24 * 3600)
+
+    def test_a_session_past_half_its_life_is_renewed_in_place(self):
+        user = find_user("admin")
+        # Two hours of a four-hour session remain, so the next request renews it.
+        save_settings({"session_lifetime_hours": 4})
+        try:
+            token = create_session_token(user, lifetime_seconds=2 * 3600)
+            response = self.client.get("/api/me", cookies={"radio_session": token})
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("set-cookie", response.headers)
+            self.assertIn("radio_session=", response.headers["set-cookie"])
+        finally:
+            save_settings({"session_lifetime_hours": 720})
+
+    def test_a_fresh_session_is_left_alone(self):
+        user = find_user("admin")
+        save_settings({"session_lifetime_hours": 4})
+        try:
+            token = create_session_token(user)
+            response = self.client.get("/api/me", cookies={"radio_session": token})
+            self.assertEqual(response.status_code, 200)
+            self.assertNotIn("set-cookie", response.headers)
+        finally:
+            save_settings({"session_lifetime_hours": 720})
+
+
+class SettingsApiTests(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app, base_url="https://127.0.0.1")
+        self.assertEqual(
+            self.client.post(
+                "/api/login",
+                json={"username": "admin", "password": "admin-password"},
+            ).status_code,
+            200,
+        )
+
+    def test_settings_describe_every_group_with_current_values(self):
+        response = self.client.get("/api/settings")
+        self.assertEqual(response.status_code, 200)
+        document = response.json()
+        group_ids = {group["id"] for group in document["groups"]}
+        self.assertEqual(
+            group_ids, {"recording", "transcription", "access", "storage"}
+        )
+        keys = {
+            field["key"]
+            for group in document["groups"]
+            for field in group["fields"]
+        }
+        self.assertIn("source_dir", keys)
+        self.assertIn("session_lifetime_hours", keys)
+        self.assertIn("minimum_free_bytes", keys)
+        self.assertIn("dashboard_url", document["service"])
+        self.assertIn("database", document["paths"])
+
+    def test_saving_a_value_stores_it_and_reports_the_restart_scope(self):
+        response = self.client.put(
+            "/api/settings", json={"values": {"sync_poll_seconds": 25, "port": 8443}}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["restart_required"], "services")
+        self.assertEqual(load_settings()["sync_poll_seconds"], 25)
+        self.assertEqual(load_settings()["port"], 8443)
+        restored = self.client.put(
+            "/api/settings", json={"values": {"port": 8000}}
+        )
+        self.assertEqual(restored.status_code, 200)
+
+    def test_values_outside_the_safe_range_are_refused(self):
+        response = self.client.put(
+            "/api/settings", json={"values": {"sync_poll_seconds": 1}}
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("at least", response.json()["detail"])
+        unknown = self.client.put("/api/settings", json={"values": {"nope": 1}})
+        self.assertEqual(unknown.status_code, 400)
+
+    def test_an_unreadable_recording_folder_is_refused(self):
+        response = self.client.put(
+            "/api/settings",
+            json={"values": {"source_dir": "/definitely/not/mounted"}},
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_a_value_pinned_by_the_environment_cannot_be_changed(self):
+        os.environ["RADIO_SYNC_BATCH_SIZE"] = "77"
+        try:
+            document = self.client.get("/api/settings").json()
+            field = next(
+                field
+                for group in document["groups"]
+                for field in group["fields"]
+                if field["key"] == "sync_batch_size"
+            )
+            self.assertTrue(field["managed_by_environment"])
+            self.assertEqual(field["value"], 77)
+            response = self.client.put(
+                "/api/settings", json={"values": {"sync_batch_size": 10}}
+            )
+            self.assertEqual(response.status_code, 400)
+        finally:
+            del os.environ["RADIO_SYNC_BATCH_SIZE"]
+
+    def test_only_administrators_may_read_or_change_settings(self):
+        self.client.post(
+            "/api/users",
+            json={
+                "username": "viewer-settings",
+                "display_name": "Viewer",
+                "role": "viewer",
+                "password": "viewer-password-1",
+                "active": True,
+            },
+        )
+        viewer = TestClient(app, base_url="https://127.0.0.1")
+        viewer.post(
+            "/api/login",
+            json={"username": "viewer-settings", "password": "viewer-password-1"},
+        )
+        self.assertEqual(viewer.get("/api/settings").status_code, 403)
+        self.assertEqual(
+            viewer.put("/api/settings", json={"values": {"port": 9000}}).status_code,
+            403,
+        )
+
+
+class MaintenanceTests(unittest.TestCase):
+    def test_old_history_is_pruned_and_recent_history_is_kept(self):
+        old = (datetime.now() - timedelta(days=400)).isoformat()
+        recent = datetime.now().isoformat()
+        with connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO events(event_type, resource_type, payload_json, created_at)
+                VALUES ('test.old', 'test', '{}', ?), ('test.new', 'test', '{}', ?)
+                """,
+                (old, recent),
+            )
+            connection.execute(
+                """
+                INSERT INTO audit_log(timestamp, username, action)
+                VALUES (?, 'admin', 'test.old'), (?, 'admin', 'test.new')
+                """,
+                (old, recent),
+            )
+            connection.commit()
+
+        save_settings({"event_retention_days": 45, "audit_retention_days": 365})
+        try:
+            prune_history()
+        finally:
+            save_settings({"event_retention_days": 45, "audit_retention_days": 730})
+
+        with connect(read_only=True) as connection:
+            events = {
+                row["event_type"]
+                for row in connection.execute(
+                    "SELECT event_type FROM events WHERE event_type LIKE 'test.%'"
+                )
+            }
+            actions = {
+                row["action"]
+                for row in connection.execute(
+                    "SELECT action FROM audit_log WHERE action LIKE 'test.%'"
+                )
+            }
+        self.assertEqual(events, {"test.new"})
+        self.assertEqual(actions, {"test.new"})
 
 
 if __name__ == "__main__":

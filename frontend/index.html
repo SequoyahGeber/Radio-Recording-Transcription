@@ -140,6 +140,18 @@
             <span id="console-error-count" class="console-error-count" hidden>0</span>
           </button>
           <button
+            id="settings-button"
+            class="topbar-control-btn settings-toggle-btn"
+            type="button"
+            aria-haspopup="dialog"
+            aria-controls="settings-modal"
+            aria-label="Settings"
+            title="Settings"
+            hidden
+          >
+            <span class="button-icon" aria-hidden="true">⚙</span>
+          </button>
+          <button
             id="export-csv"
             class="btn btn-primary"
             type="button"
@@ -303,6 +315,7 @@
             <button id="backup-drill-button" class="btn btn-quiet" type="button" disabled>Run restore drill</button>
           </div>
           <div id="backup-status" class="section-count" role="status"></div>
+          <div id="backup-list" class="backup-list" aria-label="Recovery backups"></div>
           <details id="quality-analytics-panel" class="quality-analytics-panel">
             <summary>Transcription quality evaluation</summary>
             <div id="quality-evaluation-summary"></div>
@@ -1135,6 +1148,62 @@
       <strong>No matching transmissions</strong>
       <span>Try a broader search or clear the date and time filter.</span>
     </div>
+
+    <div
+      id="settings-modal"
+      class="settings-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settings-title"
+      hidden
+    >
+      <div class="settings-card">
+        <header class="settings-header">
+          <div>
+            <span class="archive-search-eyebrow">Administration</span>
+            <h2 id="settings-title">Settings</h2>
+            <div id="settings-subtitle" class="archive-search-summary">
+              Loading current configuration…
+            </div>
+          </div>
+          <button
+            id="settings-close"
+            class="btn btn-quiet"
+            type="button"
+            aria-label="Close settings"
+          >
+            Close
+          </button>
+        </header>
+
+        <div id="settings-restart-banner" class="settings-banner" hidden>
+          <span id="settings-restart-message"
+            >Some changes need a service restart before they take effect.</span
+          >
+          <button id="settings-restart-button" class="btn btn-primary" type="button">
+            Restart services now
+          </button>
+        </div>
+
+        <div class="settings-body">
+          <nav id="settings-tabs" class="settings-tabs" aria-label="Settings sections"></nav>
+          <div id="settings-panels" class="settings-panels"></div>
+        </div>
+
+        <footer class="settings-footer">
+          <div id="settings-status" class="settings-status" role="status"></div>
+          <div class="settings-footer-actions">
+            <button id="settings-revert" class="btn btn-quiet" type="button">
+              Discard changes
+            </button>
+            <button id="settings-save" class="btn btn-primary" type="button" disabled>
+              Save changes
+            </button>
+          </div>
+        </footer>
+      </div>
+    </div>
+
     <div id="toast-container"></div>
 
     <script src="/static/js/app.js?v=20260810-1"></script>
@@ -1145,5 +1214,6 @@
     <script src="/static/js/phase6.js?v=20260801-1"></script>
     <script src="/static/js/phase7.js?v=20260801-1"></script>
     <script src="/static/js/phase8.js?v=20260801-1"></script>
+    <script src="/static/js/settings.js?v=20260814-1"></script>
   </body>
 </html>

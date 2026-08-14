@@ -190,6 +190,10 @@ def main():
     config["internal_token"] = config.get(
         "internal_token", secrets.token_urlsafe(32)
     )
+    # The native Mac app reads this key from this file - which only this macOS
+    # account can open - and uses it to sign itself in without a password.
+    if not config.get("app_key"):
+        config["app_key"] = secrets.token_urlsafe(32)
     config["created_at"] = config.get("created_at", datetime.now().isoformat())
     for legacy_key in ("username", "password_salt", "password_hash"):
         config.pop(legacy_key, None)

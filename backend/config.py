@@ -3,6 +3,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 from glob import glob
 
 # Base paths
@@ -49,6 +51,8 @@ migrate_legacy_data()
 SETTINGS_PATH = os.path.abspath(
     os.environ.get("RADIO_SETTINGS_PATH", os.path.join(DATA_DIR, "settings.json"))
 )
+_settings_lock = threading.RLock()
+_settings_cache = {"mtime": None, "values": {}, "checked": 0.0}
 
 
 def load_settings():
@@ -62,24 +66,101 @@ def load_settings():
 
 def save_settings(updates):
     os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
-    settings = load_settings()
-    settings.update(updates)
-    file_descriptor, temporary_path = tempfile.mkstemp(
-        prefix="settings-",
-        suffix=".json",
-        dir=os.path.dirname(SETTINGS_PATH),
-    )
-    try:
-        with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
-            json.dump(settings, handle, indent=2, sort_keys=True)
-        os.replace(temporary_path, SETTINGS_PATH)
-    except Exception:
+    with _settings_lock:
+        settings = load_settings()
+        settings.update(updates)
+        file_descriptor, temporary_path = tempfile.mkstemp(
+            prefix="settings-",
+            suffix=".json",
+            dir=os.path.dirname(SETTINGS_PATH),
+        )
         try:
-            os.unlink(temporary_path)
-        except OSError:
-            pass
-        raise
+            with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+                json.dump(settings, handle, indent=2, sort_keys=True)
+            os.replace(temporary_path, SETTINGS_PATH)
+        except Exception:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+            raise
+        _settings_cache["mtime"] = None
+        _settings_cache["checked"] = 0.0
     return settings
+
+
+def live_settings():
+    """Return settings.json, re-reading it only when the file actually changes.
+
+    Long-running services call this on every pass so an administrator can change
+    a tunable value in the dashboard without restarting anything. The file's
+    timestamp is checked at most once a second so that hot loops which read
+    several settings in a row do not each pay for a disk lookup.
+    """
+    now = time.monotonic()
+    with _settings_lock:
+        if _settings_cache["mtime"] is not None and now - _settings_cache["checked"] < 1.0:
+            return _settings_cache["values"]
+        try:
+            modified = os.path.getmtime(SETTINGS_PATH)
+        except OSError:
+            modified = 0.0
+        _settings_cache["checked"] = now
+        if _settings_cache["mtime"] != modified:
+            _settings_cache["values"] = load_settings()
+            _settings_cache["mtime"] = modified
+        return _settings_cache["values"]
+
+
+def _raw_setting(key, environment_variable=None):
+    if environment_variable:
+        value = os.environ.get(environment_variable)
+        if value not in (None, ""):
+            return value, True
+    return live_settings().get(key), False
+
+
+def setting_is_managed_by_environment(environment_variable):
+    return bool(environment_variable) and os.environ.get(environment_variable) not in (
+        None,
+        "",
+    )
+
+
+def text_setting(key, environment_variable=None, default=""):
+    value, _ = _raw_setting(key, environment_variable)
+    if value is None or value == "":
+        return default
+    return str(value)
+
+
+def bool_setting(key, environment_variable=None, default=False):
+    value, from_environment = _raw_setting(key, environment_variable)
+    if value is None or value == "":
+        return default
+    if from_environment or isinstance(value, str):
+        return str(value).strip().lower() not in {"0", "false", "no", "off", ""}
+    return bool(value)
+
+
+def number_setting(
+    key,
+    environment_variable=None,
+    default=0,
+    minimum=None,
+    maximum=None,
+    cast=int,
+):
+    value, _ = _raw_setting(key, environment_variable)
+    try:
+        result = cast(value)
+    except (TypeError, ValueError):
+        result = cast(default)
+    if minimum is not None:
+        result = max(cast(minimum), result)
+    if maximum is not None:
+        result = min(cast(maximum), result)
+    return result
 
 
 SETTINGS = load_settings()

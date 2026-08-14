@@ -1851,16 +1851,25 @@ async function loadCurrentProfile() {
   window.webkit?.messageHandlers?.profileAccess?.postMessage({
     role: currentProfile.role,
   });
-  document.getElementById("current-profile").innerText =
-    `${currentProfile.display_name} · ${currentProfile.role}`;
+  // Inside the Mac app there is no session to end, so signing out is replaced
+  // by a plain statement of who the dashboard is acting as.
+  const signedInOnThisMac = currentProfile.auth_source === "app";
+  document.body.classList.toggle("native-app-session", signedInOnThisMac);
+  document.getElementById("current-profile").innerText = signedInOnThisMac
+    ? `${currentProfile.display_name} · this Mac`
+    : `${currentProfile.display_name} · ${currentProfile.role}`;
+  document.getElementById("logout-button").hidden = signedInOnThisMac;
   document.getElementById("export-csv").hidden =
     !currentProfile.permissions.export;
   document.getElementById("suspect-toggle-row").hidden =
     !currentProfile.permissions.suspect;
   document.getElementById("profile-admin-section").hidden =
     !currentProfile.permissions.profiles;
+  document.getElementById("settings-button").hidden =
+    !currentProfile.permissions.profiles;
   consoleToggleButton.hidden = !currentProfile.permissions.console;
   if (currentProfile.permissions.profiles) await loadProfiles();
+  window.radioSettingsProfileReady?.(currentProfile);
 }
 
 const compactModeToggle = document.getElementById("compact-mode-toggle");

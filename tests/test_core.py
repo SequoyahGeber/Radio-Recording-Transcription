@@ -473,7 +473,9 @@ class SyncPriorityTests(unittest.TestCase):
             "stat",
             side_effect=AssertionError("timestamped files should be sorted by name"),
         ):
-            candidates = sync.candidate_files()
+            # The scan is given its settings up front so this asserts only that
+            # the walk itself never stats a recording it can read from the name.
+            candidates = sync.candidate_files(SOURCE_DIR, 30 * 60)
 
         self.assertEqual(candidates[0][2], filename)
         self.assertIsNone(candidates[0][4])
