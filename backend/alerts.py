@@ -221,6 +221,59 @@ def alert_row_to_dict(row):
     }
 
 
+def transcript_air_time(transcript):
+    """When a transmission actually happened, not when it was processed."""
+    return str(
+        transcript.get("recorded_at") or transcript.get("timestamp") or ""
+    )
+
+
+def _is_repeat_within_cooldown(connection, rule, transcript, matched_text, cooldown):
+    """Whether this match repeats one already raised on the same channel.
+
+    A cooldown means "do not raise the same words twice for the same feed in
+    quick succession". It is measured between the transmissions' air times, not
+    the moment the dashboard happened to process them: transcripts arrive in
+    bursts of fifty after any delivery outage or backlog catch-up, so comparing
+    processing times would suppress hours of genuinely separate calls - on every
+    channel at once - as though they were one repeated message.
+    """
+    air_time = transcript_air_time(transcript)
+    if not air_time:
+        return False
+    try:
+        cutoff = (
+            datetime.fromisoformat(air_time) - timedelta(seconds=cooldown)
+        ).isoformat()
+    except ValueError:
+        return False
+    channel = transcript.get("channel")
+    duplicate = connection.execute(
+        """
+        SELECT 1
+        FROM alert_events ae
+        JOIN transcripts t ON t.id = ae.transcript_id
+        WHERE ae.rule_id = ?
+          AND lower(ae.matched_text) = lower(?)
+          AND ae.status != 'false_positive'
+          AND ae.transcript_id != ?
+          AND coalesce(t.channel, '') = coalesce(?, '')
+          AND coalesce(t.recorded_at, t.timestamp) >= ?
+          AND coalesce(t.recorded_at, t.timestamp) <= ?
+        LIMIT 1
+        """,
+        (
+            rule["id"],
+            matched_text,
+            transcript.get("id"),
+            channel,
+            cutoff,
+            air_time,
+        ),
+    ).fetchone()
+    return duplicate is not None
+
+
 def evaluate_transcript_alerts(connection, transcript, actor="system"):
     rows = connection.execute(
         """
@@ -247,20 +300,10 @@ def evaluate_transcript_alerts(connection, transcript, actor="system"):
             continue
         matched_text = matches[0]
         cooldown = max(0, int(rule["cooldown_seconds"] or 0))
-        if cooldown:
-            cutoff = (now - timedelta(seconds=cooldown)).isoformat()
-            duplicate = connection.execute(
-                """
-                SELECT 1
-                FROM alert_events
-                WHERE rule_id = ? AND lower(matched_text) = lower(?)
-                  AND created_at >= ? AND status != 'false_positive'
-                LIMIT 1
-                """,
-                (rule["id"], matched_text, cutoff),
-            ).fetchone()
-            if duplicate:
-                continue
+        if cooldown and _is_repeat_within_cooldown(
+            connection, rule, transcript, matched_text, cooldown
+        ):
+            continue
         explanation = (
             f"{rule['severity'].title()} because rule {rule['name']} "
             f"matched “{matched_text}”."

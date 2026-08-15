@@ -426,6 +426,10 @@ NOTIFICATION_PREFERENCE_ALLOWED_KEYS = {
     "quiet_start",
     "quiet_end",
 }
+ALERT_SEVERITY_RANK = (
+    "CASE ae.severity WHEN 'critical' THEN 4 WHEN 'urgent' THEN 3 "
+    "WHEN 'caution' THEN 2 ELSE 1 END"
+)
 ALERT_DETAIL_SELECT = """
     ae.id, ae.transcript_id, ae.rule_id, ar.name AS rule_name,
     ae.severity, ae.matched_text, ae.explanation, ae.status,
@@ -3138,6 +3142,7 @@ def get_alerts(
     severity: str = "",
     assigned_to: str = Query("", max_length=80),
     before_id: Optional[int] = None,
+    before_rank: Optional[int] = None,
     limit: int = 100,
 ):
     session = require_role(request, "viewer")
@@ -3148,8 +3153,18 @@ def get_alerts(
         role_allows(session, "supervisor"),
     )
     if before_id is not None:
-        clauses.append("ae.id < ?")
-        parameters.append(before_id)
+        # The list is ordered by severity and then by id, so the cursor has to be
+        # that same pair. Paging on the id alone skipped every lower-severity
+        # alert with a higher id, leaving them permanently out of reach.
+        if before_rank is None:
+            clauses.append("ae.id < ?")
+            parameters.append(before_id)
+        else:
+            clauses.append(
+                f"(({ALERT_SEVERITY_RANK}) < ? "
+                f"OR (({ALERT_SEVERITY_RANK}) = ? AND ae.id < ?))"
+            )
+            parameters.extend([before_rank, before_rank, before_id])
     where_clause = " AND ".join(clauses)
     result_limit = max(1, min(int(limit), 200))
     with connect(read_only=True) as connection:
@@ -3165,19 +3180,12 @@ def get_alerts(
         ).fetchone()[0]
         rows = connection.execute(
             f"""
-            SELECT {ALERT_DETAIL_SELECT}
+            SELECT {ALERT_DETAIL_SELECT}, ({ALERT_SEVERITY_RANK}) AS severity_rank
             FROM alert_events ae
             JOIN alert_rules ar ON ar.id = ae.rule_id
             JOIN transcripts t ON t.id = ae.transcript_id
             WHERE {where_clause}
-            ORDER BY
-                CASE ae.severity
-                    WHEN 'critical' THEN 4
-                    WHEN 'urgent' THEN 3
-                    WHEN 'caution' THEN 2
-                    ELSE 1
-                END DESC,
-                ae.id DESC
+            ORDER BY ({ALERT_SEVERITY_RANK}) DESC, ae.id DESC
             LIMIT ?
             """,
             [*parameters, result_limit],
@@ -3201,6 +3209,9 @@ def get_alerts(
         "count": count,
         "active_count": active_count,
         "next_before_id": rows[-1]["id"] if len(rows) == result_limit else None,
+        "next_before_rank": (
+            rows[-1]["severity_rank"] if len(rows) == result_limit else None
+        ),
     }
 
 

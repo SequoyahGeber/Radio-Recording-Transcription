@@ -21,7 +21,7 @@ os.environ["RADIO_AUDIO_DIR"] = AUDIO_DIR
 os.environ["RADIO_DB_PATH"] = os.path.join(DATA_DIR, "test.db")
 os.environ["RADIO_RECORDING_YEAR"] = "2026"
 
-from backend.alerts import rule_matches
+from backend.alerts import evaluate_transcript_alerts, rule_matches
 from backend.database import connect, initialize_database
 from backend.glossaries import get_glossary, normalize_terms, save_glossary
 from backend.jobs import (
@@ -272,6 +272,85 @@ class DatabaseMigrationTests(unittest.TestCase):
         self.assertEqual(len(phase_six_tables), 4)
         self.assertEqual(len(phase_eight_tables), 2)
         self.assertGreaterEqual(default_rules, 5)
+
+
+class AlertCooldownTests(unittest.TestCase):
+    """A cooldown must silence repeats, never separate emergencies."""
+
+    def setUp(self):
+        initialize_database()
+        with connect() as connection:
+            connection.execute("DELETE FROM alert_events")
+            connection.execute("DELETE FROM alert_rules")
+            connection.execute(
+                """
+                INSERT INTO alert_rules(
+                    name, severity, match_mode, terms_json, exclusions_json,
+                    channel_scope_json, active, cooldown_seconds, created_by,
+                    updated_by, created_at, updated_at, version
+                ) VALUES ('Safety assistance', 'critical', 'word', '["help"]', '[]',
+                          '[]', 1, 3600, 'test', 'test',
+                          '2026-08-01T00:00:00', '2026-08-01T00:00:00', 1)
+                """
+            )
+            connection.commit()
+
+    def deliver(self, connection, filename, channel, text, recorded_at):
+        cursor = connection.execute(
+            """
+            INSERT INTO transcripts(
+                timestamp, recorded_at, channel, filename, transcript_text,
+                raw_transcript_text, quality_score, quality_reason, status
+            ) VALUES ('2026-08-14T12:00:00', ?, ?, ?, ?, ?, 1.0, '', 'ready')
+            """,
+            (recorded_at, channel, filename, text, text),
+        )
+        row = connection.execute(
+            """
+            SELECT id, channel, recorded_at, timestamp, transcript_text, quality_score
+            FROM transcripts WHERE id = ?
+            """,
+            (cursor.lastrowid,),
+        ).fetchone()
+        alerts, _ = evaluate_transcript_alerts(connection, dict(row), actor="worker")
+        return len(alerts)
+
+    def test_a_later_emergency_on_another_channel_still_alerts(self):
+        stamp = datetime.now().timestamp()
+        with connect() as connection:
+            first = self.deliver(
+                connection, f"Medical/{stamp}-1.mp3", "Medical",
+                "we need help at gate three", "2026-08-14T09:00:00",
+            )
+            # Delivered in the same burst - a backlog drain sends fifty at once -
+            # but recorded three quarters of an hour later on a different feed.
+            other = self.deliver(
+                connection, f"Security/{stamp}-1.mp3", "Security",
+                "help required at the north fence", "2026-08-14T09:45:00",
+            )
+            later = self.deliver(
+                connection, f"Medical/{stamp}-2.mp3", "Medical",
+                "help needed at the west gate", "2026-08-14T10:30:00",
+            )
+            connection.commit()
+        self.assertEqual(first, 1)
+        self.assertEqual(other, 1, "a different channel is a different emergency")
+        self.assertEqual(later, 1, "an hour and a half later is not a repeat")
+
+    def test_the_same_words_repeated_on_one_channel_are_suppressed(self):
+        stamp = datetime.now().timestamp()
+        with connect() as connection:
+            first = self.deliver(
+                connection, f"Medical/{stamp}-3.mp3", "Medical",
+                "we need help at gate three", "2026-08-14T09:00:00",
+            )
+            repeat = self.deliver(
+                connection, f"Medical/{stamp}-4.mp3", "Medical",
+                "help at gate three again", "2026-08-14T09:00:30",
+            )
+            connection.commit()
+        self.assertEqual(first, 1)
+        self.assertEqual(repeat, 0)
 
 
 class AlertRuleMatchingTests(unittest.TestCase):

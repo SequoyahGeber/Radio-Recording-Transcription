@@ -1898,6 +1898,96 @@ class SettingsApiTests(unittest.TestCase):
         )
 
 
+class AlertPaginationTests(unittest.TestCase):
+    """Paging the inbox must reach every alert, not just the loudest ones."""
+
+    def setUp(self):
+        self.client = TestClient(app, base_url="https://127.0.0.1")
+        self.assertEqual(
+            self.client.post(
+                "/api/login",
+                json={"username": "admin", "password": "admin-password"},
+            ).status_code,
+            200,
+        )
+
+    def test_lower_severity_alerts_are_still_reachable_after_the_first_page(self):
+        stamp = secrets.token_hex(4)
+        with connect() as connection:
+            rule_id = connection.execute(
+                """
+                INSERT INTO alert_rules(
+                    name, severity, match_mode, terms_json, exclusions_json,
+                    channel_scope_json, active, cooldown_seconds, created_by,
+                    updated_by, created_at, updated_at, version
+                ) VALUES (?, 'caution', 'word', '["paging"]', '[]', '[]', 1, 0,
+                          'test', 'test', '2026-08-01T00:00:00',
+                          '2026-08-01T00:00:00', 1)
+                """,
+                (f"Pagination rule {stamp}",),
+            ).lastrowid
+            # Criticals first, then cautions with higher ids: exactly the shape
+            # that an id-only cursor skipped straight past.
+            expected = []
+            for index in range(6):
+                severity = "critical" if index < 3 else "caution"
+                transcript_id = connection.execute(
+                    """
+                    INSERT INTO transcripts(
+                        timestamp, recorded_at, channel, filename, transcript_text,
+                        raw_transcript_text, quality_score, quality_reason, status
+                    ) VALUES ('2026-08-02T10:00:00', '2026-08-02T09:59:00', 'Paging',
+                              ?, 'paging test', 'paging test', 1.0, '', 'ready')
+                    """,
+                    (f"Paging/{stamp}-{index}.mp3",),
+                ).lastrowid
+                alert_id = connection.execute(
+                    """
+                    INSERT INTO alert_events(
+                        transcript_id, rule_id, severity, matched_text, explanation,
+                        status, version, created_at, updated_at
+                    ) VALUES (?, ?, ?, 'paging', 'test', 'open', 1,
+                              '2026-08-02T10:00:00', '2026-08-02T10:00:00')
+                    """,
+                    (transcript_id, rule_id, severity),
+                ).lastrowid
+                expected.append(alert_id)
+            connection.commit()
+
+        seen = []
+        parameters = {"status": "open", "limit": 2}
+        for _ in range(10):
+            page = self.client.get("/api/alerts", params=parameters).json()
+            seen.extend(item["id"] for item in page["items"])
+            if not page.get("next_before_id"):
+                break
+            parameters = {
+                "status": "open",
+                "limit": 2,
+                "before_id": page["next_before_id"],
+                "before_rank": page["next_before_rank"],
+            }
+
+        try:
+            self.assertEqual(len(seen), len(set(seen)), "no alert may be served twice")
+            for alert_id in expected:
+                self.assertIn(
+                    alert_id, seen, "every alert must be reachable by paging"
+                )
+        finally:
+            # The archive is shared with the other suites in this file.
+            with connect() as connection:
+                connection.execute(
+                    "DELETE FROM alert_events WHERE rule_id = ?", (rule_id,)
+                )
+                connection.execute("DELETE FROM alert_rules WHERE id = ?", (rule_id,))
+                connection.execute(
+                    "DELETE FROM transcripts WHERE filename LIKE ?",
+                    (f"Paging/{stamp}-%",),
+                )
+                connection.commit()
+
+
 class BackupRestoreTests(unittest.TestCase):
     """A backup is only useful if it can be put back."""
 

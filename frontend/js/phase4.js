@@ -4,6 +4,7 @@ const phaseFourState = {
   rules: [],
   assignees: [],
   nextBeforeId: null,
+  nextBeforeRank: null,
   profile: null,
   notificationPreferences: {},
 };
@@ -219,12 +220,17 @@ async function phaseFourLoadAlerts(append = false) {
   });
   if (append && phaseFourState.nextBeforeId) {
     parameters.set("before_id", phaseFourState.nextBeforeId);
+    // The list is ordered by severity first, so the cursor carries the rank too.
+    if (phaseFourState.nextBeforeRank !== null) {
+      parameters.set("before_rank", phaseFourState.nextBeforeRank);
+    }
   }
   const payload = await phaseTwoJson(`/api/alerts?${parameters}`);
   phaseFourState.alerts = append
     ? [...phaseFourState.alerts, ...payload.items]
     : payload.items;
   phaseFourState.nextBeforeId = payload.next_before_id;
+  phaseFourState.nextBeforeRank = payload.next_before_rank ?? null;
   phaseFourSetBadge(payload.active_count);
   phaseFourSummary.textContent =
     `${payload.count.toLocaleString()} matching alert${
