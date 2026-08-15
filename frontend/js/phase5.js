@@ -163,8 +163,10 @@ async function phaseFiveLoadIncidents() {
   });
   const payload = await phaseTwoJson(`/api/incidents?${parameters}`);
   phaseFiveState.incidents = payload.items;
-  const openCount = payload.items.filter((item) => item.status !== "resolved").length;
-  phaseFiveSetIncidentBadge(openCount);
+  phaseFiveSetIncidentBadge(
+    payload.active_count ??
+      payload.items.filter((item) => item.status !== "resolved").length,
+  );
   document.getElementById("incident-workspace-summary").textContent =
     `${payload.count} incident${payload.count === 1 ? "" : "s"} in this view`;
   phaseFiveRenderIncidentList();

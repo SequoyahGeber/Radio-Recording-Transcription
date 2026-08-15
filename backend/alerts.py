@@ -138,9 +138,18 @@ def seed_default_alert_rules(connection):
 
 
 def _term_pattern(term, match_mode):
-    escaped = re.escape(term.strip())
+    cleaned = term.strip()
+    escaped = re.escape(cleaned)
     if match_mode == "prefix":
         return re.compile(rf"(?<!\w){escaped}\w*", re.IGNORECASE)
+    words = cleaned.split()
+    if match_mode == "phrase" and len(words) > 1:
+        # A phrase tolerates whatever separates its words in real speech-to-text
+        # output - double spaces, a comma, a line break. Previously this compiled
+        # to exactly the whole-word pattern, so the two menu options behaved
+        # identically and "not breathing" missed "not, breathing".
+        joined = r"\W+".join(re.escape(word) for word in words)
+        return re.compile(rf"(?<!\w){joined}(?!\w)", re.IGNORECASE)
     return re.compile(rf"(?<!\w){escaped}(?!\w)", re.IGNORECASE)
 
 

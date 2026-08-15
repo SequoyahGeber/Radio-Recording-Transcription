@@ -442,6 +442,27 @@ function phaseTwoUpdatePlayerButtons(playing) {
   });
 }
 
+function phaseTwoPlayDetachedTranscript(detail) {
+  if (!detail?.filename) return;
+  if (!currentProfile?.permissions?.audio) {
+    showToast("Operator clearance is required to play audio.", "danger");
+    return;
+  }
+  const source = phaseTwoAudioUrl(detail.filename);
+  phaseTwoState.playerCard = null;
+  phaseTwoPlayer.hidden = false;
+  document.body.classList.add("player-open");
+  if (phaseTwoAudio.dataset.filename !== detail.filename) {
+    phaseTwoAudio.dataset.filename = detail.filename;
+    phaseTwoAudio.src = source;
+    phaseTwoAudio.load();
+    phaseTwoPlayerProgress.value = "0";
+  }
+  phaseTwoAudio
+    .play()
+    .catch(() => showToast("Audio unavailable or missing.", "danger"));
+}
+
 async function phaseTwoPlayCard(card, autoplay = true) {
   if (!card || !currentProfile?.permissions?.audio) return;
   const filename = card.dataset.filename;
@@ -847,13 +868,21 @@ document.getElementById("drawer-copy-button").addEventListener("click", async ()
 });
 document.getElementById("drawer-play-button").addEventListener("click", () => {
   const card = phaseTwoCardById(phaseTwoState.detail?.id);
-  if (card) phaseTwoPlayCard(card);
+  if (card) {
+    phaseTwoPlayCard(card);
+    return;
+  }
+  // A transmission opened from an incident timeline or a search result may be
+  // older than anything on the live board, so it has no card. Play it from the
+  // detail we already loaded instead of doing nothing at all.
+  phaseTwoPlayDetachedTranscript(phaseTwoState.detail);
 });
 document.getElementById("drawer-transcript").addEventListener("click", (event) => {
   const segment = event.target.closest("button[data-start]");
   if (!segment) return;
   const card = phaseTwoCardById(phaseTwoState.detail?.id);
   if (card && phaseTwoState.playerCard !== card) phaseTwoPlayCard(card);
+  if (!card) phaseTwoPlayDetachedTranscript(phaseTwoState.detail);
   phaseTwoAudio.currentTime = Number(segment.dataset.start || 0);
   phaseTwoAudio.play().catch(() => showToast("Audio unavailable or missing.", "danger"));
 });

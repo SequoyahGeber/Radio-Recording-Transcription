@@ -3173,23 +3173,39 @@ def test_alert_rule(
     if row is None:
         raise HTTPException(status_code=404, detail="Alert rule not found")
     rule = rule_row_to_dict(row)
+    # Test the sample as traffic this rule actually watches. Left at the
+    # defaults, a channel-scoped or time-scoped rule always reported "does not
+    # match" - the rule was correct, and the tester made it look broken.
+    assumptions = []
+    channel = payload.channel
+    if not channel and rule["channels"]:
+        channel = rule["channels"][0]
+        assumptions.append(f"channel {channel}")
+    recorded_at = payload.recorded_at
+    if not recorded_at:
+        recorded_at = datetime.now().isoformat()
+        if rule["start_time"]:
+            recorded_at = f"{datetime.now().date().isoformat()}T{rule['start_time']}:00"
+            assumptions.append(f"a transmission at {rule['start_time']}")
     matches = rule_matches(
         rule,
         {
             "transcript_text": payload.transcript_text,
-            "channel": payload.channel,
+            "channel": channel,
             "quality_score": payload.quality_score,
-            "recorded_at": payload.recorded_at or datetime.now().isoformat(),
+            "recorded_at": recorded_at,
         },
     )
+    context = f" Tested as {' and '.join(assumptions)}." if assumptions else ""
     return {
         "matched": bool(matches),
         "matches": matches,
+        "assumptions": assumptions,
         "explanation": (
             f"{rule['severity'].title()} because rule {rule['name']} matched "
-            f"“{matches[0]}”."
+            f"“{matches[0]}”.{context}"
             if matches
-            else "This sample does not match the rule."
+            else f"This sample does not match the rule.{context}"
         ),
     }
 
@@ -3601,7 +3617,16 @@ def get_incidents(
             """,
             parameters,
         ).fetchall()
-    return {"items": [incident_row_to_dict(row) for row in rows], "count": len(rows)}
+        # The badge must report every incident still open, not just the ones
+        # that survived the current filter or search.
+        active_count = connection.execute(
+            "SELECT count(*) FROM incidents WHERE status != 'resolved'"
+        ).fetchone()[0]
+    return {
+        "items": [incident_row_to_dict(row) for row in rows],
+        "count": len(rows),
+        "active_count": active_count,
+    }
 
 
 @app.get("/api/incidents/{incident_id}")
