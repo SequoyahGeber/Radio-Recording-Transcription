@@ -551,6 +551,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         alert.runModal()
     }
 
+    /// A fixed-size scrolling box for release notes, with the plainest of
+    /// Markdown removed so headings and emphasis read as text rather than
+    /// punctuation.
+    private func releaseNotesView(_ notes: String) -> NSView {
+        var lines: [String] = []
+        for rawLine in notes.components(separatedBy: .newlines) {
+            var line = rawLine
+            while line.hasPrefix("#") { line.removeFirst() }
+            line = line.replacingOccurrences(of: "**", with: "")
+            line = line.replacingOccurrences(of: "`", with: "")
+            lines.append(line.trimmingCharacters(in: .whitespaces))
+        }
+        let cleaned = lines.joined(separator: "\n")
+            .replacingOccurrences(of: "\n\n\n", with: "\n\n")
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 220))
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.borderType = .bezelBorder
+        scroll.drawsBackground = false
+
+        let textView = NSTextView(frame: scroll.bounds)
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.textContainerInset = NSSize(width: 6, height: 6)
+        textView.font = .systemFont(ofSize: 11)
+        textView.string = cleaned
+        textView.textColor = .labelColor
+        scroll.documentView = textView
+        return scroll
+    }
+
     @objc private func checkForUpdates() {
         performUpdateCheck(manual: true)
     }
@@ -607,13 +640,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
             let alert = NSAlert()
             alert.messageText = "Radio Command Center \(latestVersion) is available"
-            let releaseNotes = (value["release_notes"] as? String)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let notes = releaseNotes?.isEmpty == false
-                ? "\n\n\(releaseNotes!.prefix(1800))"
-                : ""
             alert.informativeText =
-                "The update will be verified before installation. Recordings, transcripts, profiles, credentials, and settings remain in Application Support and will not be replaced.\(notes)"
+                "The update will be verified before installation. Recordings, transcripts, profiles, credentials, and settings remain in Application Support and will not be replaced."
+            // Release notes go in a scrolling box of fixed height. Appending them
+            // to the informative text grew the alert with the length of the
+            // notes, and a long set pushed these buttons off the bottom of the
+            // screen where they could not be reached or resized into view.
+            let releaseNotes = (value["release_notes"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !releaseNotes.isEmpty {
+                alert.accessoryView = self.releaseNotesView(releaseNotes)
+            }
             alert.addButton(withTitle: "Download & Install")
             alert.addButton(withTitle: "Later")
             if alert.runModal() == .alertFirstButtonReturn {
