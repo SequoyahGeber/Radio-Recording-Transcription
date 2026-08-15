@@ -2095,6 +2095,151 @@ class DiagnosticsRedactionTests(unittest.TestCase):
                 )
 
 
+class SearchPagingTests(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app, base_url="https://127.0.0.1")
+        self.assertEqual(
+            self.client.post(
+                "/api/login",
+                json={"username": "admin", "password": "admin-password"},
+            ).status_code,
+            200,
+        )
+
+    def _add(self, stamp, index):
+        with connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO transcripts(
+                    timestamp, recorded_at, recording_year, channel, filename,
+                    transcript_text, raw_transcript_text, quality_score,
+                    quality_reason, status
+                ) VALUES (?, ?, 2026, 'Paging', ?, ?, ?, 1.0, '', 'ready')
+                """,
+                (
+                    f"2026-06-01T10:{index:02d}:00",
+                    f"2026-06-01T10:{index:02d}:00",
+                    f"Paging/{stamp}-{index}.mp3",
+                    f"cursor {stamp} traffic",
+                    f"cursor {stamp} traffic",
+                ),
+            )
+            connection.commit()
+
+    def test_new_traffic_mid_scroll_does_not_repeat_rows(self):
+        stamp = secrets.token_hex(4)
+        for index in range(6):
+            self._add(stamp, index)
+        self.addCleanup(self._remove, stamp)
+
+        first = self.client.get(
+            "/api/search", params={"q": stamp, "limit": 3, "sort": "recent"}
+        ).json()
+        # A transmission lands while the operator is reading the first page.
+        self._add(stamp, 90)
+        second = self.client.get(
+            "/api/search",
+            params={
+                "q": stamp,
+                "limit": 3,
+                "sort": "recent",
+                "cursor": first["next_cursor"],
+            },
+        ).json()
+
+        seen = [row["id"] for row in first["items"]] + [
+            row["id"] for row in second["items"]
+        ]
+        self.assertEqual(
+            len(seen), len(set(seen)), "a page must not repeat rows already shown"
+        )
+
+    def _remove(self, stamp):
+        with connect() as connection:
+            connection.execute(
+                "DELETE FROM transcripts WHERE filename LIKE ?", (f"Paging/{stamp}-%",)
+            )
+            connection.commit()
+
+
+class FilteredExportTests(unittest.TestCase):
+    """An export has to be the result set the operator was looking at."""
+
+    def setUp(self):
+        self.client = TestClient(app, base_url="https://127.0.0.1")
+        self.assertEqual(
+            self.client.post(
+                "/api/login",
+                json={"username": "admin", "password": "admin-password"},
+            ).status_code,
+            200,
+        )
+
+    def test_the_export_honours_the_channel_and_year_on_screen(self):
+        stamp = secrets.token_hex(4)
+        rows = [
+            ("Fire", 2026, "2026-05-01T10:00:00", f"Fire/{stamp}-a.mp3"),
+            ("Fire", 2025, "2025-05-01T10:00:00", f"Fire/{stamp}-b.mp3"),
+            ("Security", 2026, "2026-05-01T11:00:00", f"Security/{stamp}-c.mp3"),
+        ]
+        with connect() as connection:
+            for channel, year, recorded_at, filename in rows:
+                connection.execute(
+                    """
+                    INSERT INTO transcripts(
+                        timestamp, recorded_at, recording_year, channel, filename,
+                        transcript_text, raw_transcript_text, quality_score,
+                        quality_reason, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1.0, '', 'ready')
+                    """,
+                    (
+                        recorded_at,
+                        recorded_at,
+                        year,
+                        channel,
+                        filename,
+                        f"perimeter {stamp} report",
+                        f"perimeter {stamp} report",
+                    ),
+                )
+            connection.commit()
+        self.addCleanup(self._remove, stamp)
+
+        search = self.client.get(
+            "/api/search",
+            params={"q": stamp, "channel": "Fire", "year": 2026},
+        ).json()
+        exported = self.client.get(
+            "/api/export.csv",
+            params={"q": stamp, "channel": "Fire", "year": 2026},
+        )
+        counted = self.client.get(
+            "/api/export/count",
+            params={"q": stamp, "channel": "Fire", "year": 2026},
+        ).json()
+
+        body = exported.text.strip().split("\n")
+        self.assertEqual(search["count"], 1)
+        self.assertEqual(
+            counted["count"],
+            search["count"],
+            "the count offered before download must match the search",
+        )
+        self.assertEqual(len(body) - 1, search["count"])
+        self.assertIn(f"Fire/{stamp}-a.mp3", exported.text)
+        self.assertNotIn(f"Fire/{stamp}-b.mp3", exported.text, "wrong year exported")
+        self.assertNotIn(
+            f"Security/{stamp}-c.mp3", exported.text, "wrong channel exported"
+        )
+
+    def _remove(self, stamp):
+        with connect() as connection:
+            connection.execute(
+                "DELETE FROM transcripts WHERE filename LIKE ?", (f"%{stamp}-%",)
+            )
+            connection.commit()
+
+
 class AlertPaginationTests(unittest.TestCase):
     """Paging the inbox must reach every alert, not just the loudest ones."""
 

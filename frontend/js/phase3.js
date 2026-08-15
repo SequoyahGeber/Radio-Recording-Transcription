@@ -55,6 +55,45 @@ function phaseThreeMarkedSnippet(value) {
     .replaceAll("⟧", "</mark>");
 }
 
+// The export builds its request from these when the archive view is open, so a
+// downloaded CSV is the result set the operator was looking at.
+for (const id of ["apply-date-filter", "clear-date-filter"]) {
+  document.getElementById(id).addEventListener("click", () => {
+    if (!phaseThreeView.hidden && phaseThreeState.query) {
+      phaseThreeState.cursor = null;
+      phaseThreeExecuteSearch();
+    }
+  });
+}
+
+window.phaseThreeApplyClearance = function (profile) {
+  // Offering "Suspect only" to a role that may not see suspect transcripts
+  // produced a list of clean transcripts labelled as the suspect ones.
+  const option = document.querySelector(
+    '#archive-search-status option[value="suspect"]',
+  );
+  if (!option) return;
+  option.hidden = !profile?.permissions?.suspect;
+  option.disabled = !profile?.permissions?.suspect;
+  if (option.disabled && option.selected) {
+    document.getElementById("archive-search-status").value = "";
+  }
+};
+
+window.phaseThreeExportParameters = function () {
+  if (phaseThreeView.hidden) return null;
+  const parameters = new URLSearchParams();
+  const query = globalSearchInput.value.trim();
+  if (query) parameters.set("q", query);
+  for (const [key, value] of Object.entries(phaseThreeCurrentFilters())) {
+    if (value === true) parameters.set(key, "true");
+    else if (value !== "" && value !== null && value !== undefined) {
+      parameters.set(key, String(value));
+    }
+  }
+  return parameters;
+};
+
 function phaseThreeCurrentFilters() {
   const filters = {};
   for (const [key, id] of Object.entries(phaseThreeFilterIds)) {
@@ -436,6 +475,12 @@ for (const id of [
   "archive-search-model",
   "archive-search-page-size",
   "archive-search-bookmarked",
+  // The date and time inputs feed phaseThreeCurrentFilters, so leaving them out
+  // meant Apply changed the filters the next request would send without
+  // re-running the search - and the stale cursor then failed to decode.
+  "filter-date",
+  "filter-start",
+  "filter-end",
 ]) {
   document.getElementById(id).addEventListener("change", () => {
     if (phaseThreeState.query) {

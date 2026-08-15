@@ -93,7 +93,7 @@ from backend.security import (
     validate_session_token,
     verify_internal_token,
 )
-from backend.search import search_transcripts
+from backend.search import export_filter, search_transcripts
 from backend.readiness import readiness_status, validate_source
 from backend.jobs import queue_summary
 from backend.model_downloads import (
@@ -1043,29 +1043,66 @@ def export_query_parts(
     end_time="",
     bookmarked=False,
     through_id=None,
+    include_suspect=True,
+    **archive_filters,
 ):
-    return transcript_filter(
+    """Build the WHERE clause for an export.
+
+    When the request carries archive-search filters, the export is built from
+    the same matcher and the same filters the results on screen came from, so
+    what is downloaded is what was being looked at. The export used to accept
+    none of those filters and match with a substring instead of the index, so a
+    search narrowed to one channel and year exported the whole archive.
+    """
+    archive_filters = {
+        name: value
+        for name, value in archive_filters.items()
+        if value not in ("", None)
+    }
+    if archive_filters:
+        clause, parameters, used_fts = export_filter(
+            query=query,
+            bookmarked=bookmarked,
+            start_time=start_time,
+            end_time=end_time,
+            include_suspect=include_suspect,
+            **archive_filters,
+        )
+        if through_id:
+            clause = f"({clause}) AND t.id <= ?"
+            parameters = [*parameters, through_id]
+        return clause, parameters, used_fts
+    clause, parameters = transcript_filter(
         query=query,
         date_value=date_value,
         start_time=start_time,
         end_time=end_time,
-        include_suspect=True,
+        include_suspect=include_suspect,
         bookmarked=bookmarked,
         through_id=through_id,
+    )
+    return clause, parameters, False
+
+
+def export_source(used_fts):
+    return (
+        "transcripts_fts JOIN transcripts t ON t.id = transcripts_fts.rowid"
+        if used_fts
+        else "transcripts t"
     )
 
 
 def count_export_rows(**filters):
-    where_clause, parameters = export_query_parts(**filters)
+    where_clause, parameters, used_fts = export_query_parts(**filters)
     with connect(read_only=True) as connection:
         return connection.execute(
-            f"SELECT count(*) FROM transcripts WHERE {where_clause}",
+            f"SELECT count(*) FROM {export_source(used_fts)} WHERE {where_clause}",
             parameters,
         ).fetchone()[0]
 
 
 def stream_export_csv(**filters):
-    where_clause, parameters = export_query_parts(**filters)
+    where_clause, parameters, used_fts = export_query_parts(**filters)
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(
@@ -1084,11 +1121,11 @@ def stream_export_csv(**filters):
     with connect(read_only=True) as connection:
         cursor = connection.execute(
             f"""
-            SELECT timestamp, recorded_at, filename, transcript_text,
-                   status, reviewed, bookmarked, notes
-            FROM transcripts
+            SELECT t.timestamp, t.recorded_at, t.filename, t.transcript_text,
+                   t.status, t.reviewed, t.bookmarked, t.notes
+            FROM {export_source(used_fts)}
             WHERE {where_clause}
-            ORDER BY coalesce(recorded_at, timestamp) ASC, id ASC
+            ORDER BY coalesce(t.recorded_at, t.timestamp) ASC, t.id ASC
             """,
             parameters,
         )
@@ -1969,6 +2006,8 @@ def search_archive(
                 model=model.strip(),
                 include_suspect=include_suspect,
             )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except (ValueError, sqlite3.OperationalError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
@@ -2092,6 +2131,14 @@ def export_csv(
     end: str = "",
     bookmarked: bool = False,
     through_id: Optional[int] = None,
+    channel: str = Query("", max_length=160),
+    year: Optional[int] = None,
+    date_from: str = "",
+    date_to: str = "",
+    status: str = "",
+    review_state: str = "",
+    reviewer: str = Query("", max_length=80),
+    model: str = Query("", max_length=200),
 ):
     session = require_role(request, "supervisor")
     if through_id is None:
@@ -2106,6 +2153,14 @@ def export_csv(
         "end_time": end,
         "bookmarked": bookmarked,
         "through_id": through_id,
+        "channel": channel,
+        "year": year,
+        "date_from": date_from,
+        "date_to": date_to,
+        "status": status,
+        "review_state": review_state,
+        "reviewer": reviewer,
+        "model": model,
     }
     row_count = count_export_rows(**filters)
     audit(session["u"], "export", details={"rows": row_count, "query": q})
@@ -2129,6 +2184,14 @@ def export_count(
     start: str = "",
     end: str = "",
     bookmarked: bool = False,
+    channel: str = Query("", max_length=160),
+    year: Optional[int] = None,
+    date_from: str = "",
+    date_to: str = "",
+    status: str = "",
+    review_state: str = "",
+    reviewer: str = Query("", max_length=80),
+    model: str = Query("", max_length=200),
 ):
     require_role(request, "supervisor")
     with connect(read_only=True) as connection:
@@ -2142,6 +2205,14 @@ def export_count(
         end_time=end,
         bookmarked=bookmarked,
         through_id=through_id,
+        channel=channel,
+        year=year,
+        date_from=date_from,
+        date_to=date_to,
+        status=status,
+        review_state=review_state,
+        reviewer=reviewer,
+        model=model,
     )
     return {"count": row_count, "through_id": through_id}
 

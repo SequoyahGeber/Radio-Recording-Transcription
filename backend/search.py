@@ -22,7 +22,9 @@ def quote_fts_term(value, prefix=False):
         WORD_SANITIZER.sub("", word)
         for word in str(value or "").strip().split()
     ]
-    cleaned = " ".join(word for word in words if word)
+    cleaned = " ".join(
+        word for word in words if word and re.search(r"\w", word, re.UNICODE)
+    )
     if not cleaned:
         return ""
     escaped = cleaned.replace('"', '""')
@@ -67,17 +69,23 @@ def search_fingerprint(query, filters, sort):
     return hashlib.sha256(payload).hexdigest()[:16]
 
 
-def encode_cursor(offset, fingerprint):
+def encode_cursor(offset, fingerprint, through_id=0):
     payload = json.dumps(
-        {"offset": offset, "fingerprint": fingerprint},
+        {"offset": offset, "fingerprint": fingerprint, "through_id": through_id},
         separators=(",", ":"),
     ).encode("utf-8")
     return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
 
 def decode_cursor(value, fingerprint):
+    """Return the offset and the snapshot the first page was taken from.
+
+    Paging on an offset alone against a table that keeps growing repeated rows:
+    every transmission recorded since the previous page pushed the same results
+    down, so "Load more" served transcripts the operator had already seen.
+    """
     if not value:
-        return 0
+        return 0, 0
     try:
         padded = value + "=" * (-len(value) % 4)
         payload = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
@@ -86,7 +94,7 @@ def decode_cursor(value, fingerprint):
         offset = int(payload["offset"])
         if offset < 0 or offset > 5_000_000:
             raise ValueError("cursor is outside the supported range")
-        return offset
+        return offset, int(payload.get("through_id") or 0)
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("invalid search cursor") from exc
 
@@ -113,8 +121,9 @@ def build_search_filters(
         if status not in SEARCH_STATUSES:
             raise ValueError("invalid transcript status")
         if status == "suspect" and not include_suspect:
-            clauses.append("t.status = 'ready'")
-            normalized["status"] = "ready"
+            raise PermissionError(
+                "Supervisor clearance is required to review suspect transcripts"
+            )
         else:
             clauses.append("t.status = ?")
             parameters.append(status)
@@ -185,6 +194,22 @@ def build_search_filters(
     return clauses, parameters, normalized
 
 
+def export_filter(query="", **filters):
+    """The WHERE clause for exporting exactly what a search is showing.
+
+    The CSV export used its own substring matcher and accepted none of the
+    archive filters, so an operator who searched, narrowed to one channel and
+    one year, then pressed Export handed over a file spanning every channel and
+    year - including transcripts they were not even shown.
+    """
+    clauses, parameters, _ = build_search_filters(**filters)
+    fts_query = safe_search_query(query) if query else ""
+    if fts_query:
+        clauses.insert(0, "transcripts_fts MATCH ?")
+        parameters.insert(0, fts_query)
+    return " AND ".join(clauses), parameters, bool(fts_query)
+
+
 def search_transcripts(
     connection,
     *,
@@ -205,8 +230,17 @@ def search_transcripts(
     parameters.insert(0, fts_query)
     where_clause = " AND ".join(clauses)
     fingerprint = search_fingerprint(fts_query, normalized_filters, sort)
-    offset = decode_cursor(cursor, fingerprint)
+    offset, through_id = decode_cursor(cursor, fingerprint)
     result_limit = max(1, min(int(limit), 100))
+    if not through_id:
+        through_id = connection.execute(
+            "SELECT coalesce(max(id), 0) FROM transcripts"
+        ).fetchone()[0]
+    # Every page of one search reads the archive as it stood when the search
+    # began, so live traffic cannot shuffle results underneath the operator.
+    clauses.append("t.id <= ?")
+    parameters.append(through_id)
+    where_clause = " AND ".join(clauses)
 
     total = connection.execute(
         f"""
@@ -247,7 +281,7 @@ def search_transcripts(
         "rows": rows,
         "count": total,
         "next_cursor": (
-            encode_cursor(next_offset, fingerprint)
+            encode_cursor(next_offset, fingerprint, through_id)
             if next_offset < total
             else None
         ),

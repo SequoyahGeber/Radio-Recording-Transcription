@@ -1524,6 +1524,14 @@ window.exportCSV = async function () {
   const parameters = archiveQueryParameters();
   parameters.delete("include_suspect");
   parameters.delete("limit");
+  // When the archive-search view is open, export what is on screen: the same
+  // query and the same filters, not the whole board.
+  if (window.phaseThreeExportParameters) {
+    const searchParameters = window.phaseThreeExportParameters();
+    if (searchParameters) {
+      for (const [key, value] of searchParameters) parameters.set(key, value);
+    }
+  }
   const exportButton = document.getElementById("export-csv");
   exportButton.disabled = true;
   exportButton.setAttribute("aria-busy", "true");
@@ -1870,6 +1878,7 @@ async function loadCurrentProfile() {
   consoleToggleButton.hidden = !currentProfile.permissions.console;
   if (currentProfile.permissions.profiles) await loadProfiles();
   window.radioSettingsProfileReady?.(currentProfile);
+  window.phaseThreeApplyClearance?.(currentProfile);
 }
 
 const compactModeToggle = document.getElementById("compact-mode-toggle");
