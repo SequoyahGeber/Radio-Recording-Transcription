@@ -430,7 +430,21 @@ async function phaseFourSaveRule() {
     phaseFourEditRule(rule);
     showToast("Alert rule saved.", "success");
   } catch (error) {
-    if (error.status === 409) await phaseFourLoadRules();
+    if (error.status === 409) {
+      // The server hands back the rule as it now stands. Taking its version
+      // lets the operator save their own edits on the next press instead of
+      // being told the same thing forever.
+      const current = error.payload?.detail?.current;
+      if (current?.version) {
+        document.getElementById("alert-rule-version").value = current.version;
+      }
+      await phaseFourLoadRules();
+      showToast(
+        `${error.message}. Your changes are still in the form — save again to apply them.`,
+        "danger",
+      );
+      return;
+    }
     showToast(error.message, "danger");
   }
 }

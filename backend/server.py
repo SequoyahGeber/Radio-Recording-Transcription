@@ -56,7 +56,7 @@ from backend.config import (
     PROJECT_ROOT,
     RADIO_HOST,
     RADIO_PORT,
-    RECORDING_SOURCE_DIR,
+    current_source_dir,
     load_settings,
     number_setting,
     save_settings,
@@ -612,7 +612,7 @@ def service_snapshot():
         ),
         "engine": RADIO_ENGINE,
         "model_size": RADIO_MODEL_SIZE,
-        "source_directory": RECORDING_SOURCE_DIR,
+        "source_directory": current_source_dir(),
         "components": {
             name: {
                 "status": details.get("status"),
@@ -761,8 +761,8 @@ def build_stats():
         "rate_per_minute": round(rate_per_minute, 1),
         "eta_minutes": round(eta_minutes) if eta_minutes is not None else None,
         "latest_completed_at": row["latest"],
-        "source_directory": RECORDING_SOURCE_DIR,
-        "source_mounted": os.path.isdir(RECORDING_SOURCE_DIR),
+        "source_directory": current_source_dir(),
+        "source_mounted": os.path.isdir(current_source_dir()),
         "services": heartbeats,
     }
 
@@ -1142,7 +1142,7 @@ def build_health_center():
     worker_heartbeat = heartbeats.get("worker")
     sync_details = (sync_heartbeat or {}).get("details", {})
     worker_details = (worker_heartbeat or {}).get("details", {})
-    source_mounted = os.path.isdir(RECORDING_SOURCE_DIR)
+    source_mounted = os.path.isdir(current_source_dir())
     if not source_mounted:
         source_status = "critical"
         source_summary = "Recording source is unavailable"
@@ -1341,7 +1341,7 @@ def _redact_diagnostic_text(value):
     for path, replacement in (
         (PROJECT_ROOT, "<project>"),
         (AUDIO_DIR, "<recordings>"),
-        (RECORDING_SOURCE_DIR, "<source>"),
+        (current_source_dir(), "<source>"),
         (os.path.expanduser("~"), "<home>"),
     ):
         if path:
@@ -1443,8 +1443,10 @@ def format_shift_handoff(report):
     lines.extend(["", f"SYSTEM ISSUES ({report['counts']['system_issues']})"])
     for component in report["system_issues"]:
         lines.append(f"- {component['label']}: {component['summary']}")
-    if len(lines) == 8:
-        lines.append("- No outstanding handoff items.")
+    # Every section prints a heading, so the line count is never a measure of
+    # whether anything is outstanding. Count the reported items instead.
+    if not any(report["counts"].values()):
+        lines.extend(["", "Nothing outstanding at handoff."])
     return "\n".join(lines) + "\n"
 
 
@@ -1596,7 +1598,7 @@ def health_check():
     return {
         "status": build_stats()["status"],
         "database_exists": os.path.exists(DB_NAME),
-        "source_mounted": os.path.isdir(RECORDING_SOURCE_DIR),
+        "source_mounted": os.path.isdir(current_source_dir()),
     }
 
 
@@ -1748,13 +1750,17 @@ def export_diagnostics(request: Request):
     }
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        # These two were written raw, so a bundle described as redacted still
+        # carried absolute home-directory paths out of the machine.
         archive.writestr(
             "diagnostics.json",
-            json.dumps(diagnostic_summary, indent=2, sort_keys=True),
+            _redact_diagnostic_text(
+                json.dumps(diagnostic_summary, indent=2, sort_keys=True)
+            ),
         )
         archive.writestr(
             "health-center.json",
-            json.dumps(health, indent=2, sort_keys=True),
+            _redact_diagnostic_text(json.dumps(health, indent=2, sort_keys=True)),
         )
         archive.writestr(
             "shift-handoff.txt",

@@ -1898,6 +1898,31 @@ class SettingsApiTests(unittest.TestCase):
         )
 
 
+class DiagnosticsRedactionTests(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app, base_url="https://127.0.0.1")
+        self.assertEqual(
+            self.client.post(
+                "/api/login",
+                json={"username": "admin", "password": "admin-password"},
+            ).status_code,
+            200,
+        )
+
+    def test_no_file_in_the_bundle_carries_a_home_directory_path(self):
+        response = self.client.get("/api/diagnostics.zip")
+        self.assertEqual(response.status_code, 200)
+        home = os.path.expanduser("~")
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            names = archive.namelist()
+            self.assertIn("health-center.json", names)
+            for name in names:
+                content = archive.read(name).decode("utf-8", "replace")
+                self.assertNotIn(
+                    home, content, f"{name} leaks the home directory path"
+                )
+
+
 class AlertPaginationTests(unittest.TestCase):
     """Paging the inbox must reach every alert, not just the loudest ones."""
 

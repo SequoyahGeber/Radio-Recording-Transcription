@@ -6,10 +6,9 @@ from datetime import datetime
 
 from backend.config import (
     AUDIO_DIR,
-    RECORDING_SOURCE_DIR,
     bool_setting,
+    current_source_dir,
     number_setting,
-    text_setting,
 )
 from backend.database import connect, initialize_database, update_heartbeat
 
@@ -36,11 +35,7 @@ def announce(message, key, repeat_seconds=900):
 # folder or a timing value in the settings screen takes effect within seconds
 # and never needs a service restart.
 def source_directory():
-    return os.path.abspath(
-        os.path.expanduser(
-            text_setting("source_dir", "RADIO_SOURCE_DIR", RECORDING_SOURCE_DIR)
-        )
-    )
+    return current_source_dir()
 
 
 def poll_seconds():

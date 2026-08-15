@@ -171,6 +171,22 @@ RECORDING_SOURCE_DIR = os.path.abspath(
         SETTINGS.get("source_dir", "/Volumes/Active Recording"),
     )
 )
+
+
+def current_source_dir():
+    """The recording folder in force right now.
+
+    RECORDING_SOURCE_DIR is resolved once at import. Every long-running service
+    reads this instead, so changing the folder in settings takes effect without
+    a restart and the dashboard never reports a folder that is no longer in use.
+    """
+    return os.path.abspath(
+        os.path.expanduser(
+            text_setting("source_dir", "RADIO_SOURCE_DIR", RECORDING_SOURCE_DIR)
+        )
+    )
+
+
 RECORDINGS_DIR = os.path.join(DATA_DIR, "recordings")
 LEGACY_YEAR_AUDIO_DIR = os.path.join(RECORDINGS_DIR, RECORDING_YEAR)
 DEFAULT_AUDIO_DIR = (

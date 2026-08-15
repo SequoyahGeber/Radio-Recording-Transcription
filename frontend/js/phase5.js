@@ -241,8 +241,45 @@ function phaseFiveTaskRow(task) {
   return row;
 }
 
+const INCIDENT_DRAFT_IDS = ["incident-note-draft", "incident-task-draft"];
+
+function phaseFiveCaptureDrafts() {
+  // The incident pane is rebuilt every thirty seconds by the background
+  // refresh. Without this, a note being typed - and the caret with it - was
+  // thrown away mid-sentence.
+  const active = document.activeElement;
+  return INCIDENT_DRAFT_IDS.map((id) => {
+    const field = document.getElementById(id);
+    if (!field || !field.value) return null;
+    return {
+      id,
+      value: field.value,
+      focused: field === active,
+      selectionStart: field.selectionStart,
+      selectionEnd: field.selectionEnd,
+    };
+  }).filter(Boolean);
+}
+
+function phaseFiveRestoreDrafts(drafts) {
+  for (const draft of drafts) {
+    const field = document.getElementById(draft.id);
+    if (!field) continue;
+    field.value = draft.value;
+    if (draft.focused) {
+      field.focus();
+      try {
+        field.setSelectionRange(draft.selectionStart, draft.selectionEnd);
+      } catch {
+        // Some input types refuse a selection range; the text is what matters.
+      }
+    }
+  }
+}
+
 function phaseFiveRenderIncidentDetail() {
   const incident = phaseFiveState.incident;
+  const drafts = phaseFiveCaptureDrafts();
   phaseFiveIncidentDetail.replaceChildren();
   phaseFiveIncidentDetail.tabIndex = -1;
   if (!incident) return;
@@ -333,6 +370,7 @@ function phaseFiveRenderIncidentDetail() {
     const form = document.createElement("div");
     form.className = "incident-inline-form";
     const input = document.createElement("input");
+    input.id = "incident-task-draft";
     input.placeholder = "Add a follow-up task";
     input.maxLength = 500;
     const add = phaseFiveButton("Add task", "btn", async () => {
@@ -372,6 +410,7 @@ function phaseFiveRenderIncidentDetail() {
     const form = document.createElement("div");
     form.className = "incident-inline-form";
     const input = document.createElement("textarea");
+    input.id = "incident-note-draft";
     input.rows = 2;
     input.placeholder = "Add a timestamped incident note";
     const add = phaseFiveButton("Add note", "btn", async () => {
@@ -391,6 +430,7 @@ function phaseFiveRenderIncidentDetail() {
     notes.appendChild(form);
   }
   phaseFiveIncidentDetail.append(header, summary, tags, transmissionSection, tasks, notes);
+  phaseFiveRestoreDrafts(drafts);
 }
 
 function phaseFiveDateTimeLocal(value) {
@@ -469,7 +509,20 @@ async function phaseFiveSaveIncident() {
     await phaseFiveSelectIncident(incident.id, false);
     showToast("Incident saved.", "success");
   } catch (error) {
-    if (error.status === 409 && id) await phaseFiveSelectIncident(Number(id), false);
+    if (error.status === 409 && id) {
+      // Adopt the version that is now current so the operator's typing survives
+      // and one more Save succeeds. Discarding it made every retry fail.
+      const current = error.payload?.current;
+      if (current?.version) {
+        document.getElementById("incident-editor-version").value = current.version;
+      }
+      await phaseFiveSelectIncident(Number(id), false);
+      showToast(
+        `${error.message}. Your edits are still here — review them and save again.`,
+        "danger",
+      );
+      return;
+    }
     showToast(error.message, "danger");
   }
 }
@@ -709,8 +762,21 @@ document.getElementById("incident-link-create").addEventListener("click", () => 
 document.getElementById("shift-handoff-button").addEventListener("click", phaseFiveOpenHandoff);
 document.getElementById("shift-handoff-refresh").addEventListener("click", phaseFiveLoadHandoff);
 document.getElementById("shift-handoff-copy").addEventListener("click", async () => {
-  await navigator.clipboard.writeText(phaseFiveState.handoffText);
-  showToast("Shift handoff copied.", "success");
+  // Reporting success for an empty or refused copy is worse than saying
+  // nothing: the operator walks away believing they have the handoff.
+  if (!phaseFiveState.handoffText) {
+    showToast("The handoff is still loading — try again in a moment.", "danger");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(phaseFiveState.handoffText);
+    showToast("Shift handoff copied.", "success");
+  } catch (error) {
+    showToast(
+      "The browser refused clipboard access. Use Download instead.",
+      "danger",
+    );
+  }
 });
 document.getElementById("shift-handoff-download").addEventListener("click", () => {
   const hours = document.getElementById("shift-handoff-hours").value;
