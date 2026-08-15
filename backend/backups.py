@@ -222,7 +222,24 @@ def apply_pending_restore(log=print):
             result["previous_database"] = replaced
             log(f"[RESTORE] Kept the previous archive at {replaced}")
 
-        shutil.copy2(source, DB_NAME)
+        # The copy lands beside the archive first and only takes its place once
+        # it is complete and verified. Copying straight onto the live file left
+        # a window where running out of disk - or a data directory on a drive
+        # that disconnects - truncated the archive with nothing to fall back to.
+        staged = f"{DB_NAME}.restoring-{stamp}"
+        try:
+            shutil.copy2(source, staged)
+            if _sha256(staged) != request.get("sha256"):
+                raise RuntimeError("The restored copy did not survive being written")
+            os.chmod(staged, 0o600)
+            os.replace(staged, DB_NAME)
+        except Exception:
+            try:
+                os.unlink(staged)
+            except OSError:
+                pass
+            raise
+
         # The old write-ahead log belongs to the database that was just
         # replaced; leaving it in place would corrupt the restored one.
         for suffix in ("-wal", "-shm"):
@@ -230,7 +247,6 @@ def apply_pending_restore(log=print):
                 os.unlink(f"{DB_NAME}{suffix}")
             except OSError:
                 pass
-        os.chmod(DB_NAME, 0o600)
         result["status"] = "restored"
         log(f"[RESTORE] Restored backup {request.get('backup_id')} into {DB_NAME}")
     except Exception as exc:

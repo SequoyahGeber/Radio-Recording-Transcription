@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import fcntl
 import json
 import os
 import platform
@@ -61,14 +62,58 @@ def read_pid():
         return None
 
 
-def process_is_running(pid):
+def supervisor_lock_is_held():
+    """Ask the lock, not the pid file, whether a supervisor is alive.
+
+    A recorded pid is reissued to unrelated processes after a reboot, which made
+    a dead installation report itself as running - so Launch did nothing and
+    Stop would have signalled a stranger.
+    """
+    lock_path = os.path.join(RUNTIME_DIR, "supervisor.lock")
+    if not os.path.exists(lock_path):
+        return None
+    try:
+        with open(lock_path, "a+") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True
+            fcntl.flock(handle, fcntl.LOCK_UN)
+    except OSError:
+        return None
+    return False
+
+
+def pid_is_this_supervisor(pid):
+    """Whether that pid is really our supervisor and not a recycled number.
+
+    Used only for installations upgrading from a version that kept no lock
+    file; asking the process what it is avoids signalling a stranger that
+    happens to have inherited the pid after a reboot.
+    """
     if not pid:
         return False
     try:
         os.kill(pid, 0)
-        return True
     except OSError:
         return False
+    try:
+        described = subprocess.run(
+            ["/bin/ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return "supervisor.py" in described
+
+
+def process_is_running(pid):
+    held = supervisor_lock_is_held()
+    if held is not None:
+        return held
+    return pid_is_this_supervisor(pid)
 
 
 def status():

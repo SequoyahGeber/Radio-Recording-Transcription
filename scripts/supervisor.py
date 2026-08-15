@@ -2,6 +2,7 @@
 import json
 import os
 import signal
+import fcntl
 import subprocess
 import sys
 import threading
@@ -30,6 +31,7 @@ from backend.config import (
 
 
 PID_PATH = os.path.join(RUNTIME_DIR, "supervisor.pid")
+LOCK_PATH = os.path.join(RUNTIME_DIR, "supervisor.lock")
 STATUS_PATH = os.path.join(RUNTIME_DIR, "service-status.json")
 STOPPING = False
 DEFAULT_MAX_LOG_BYTES = 10 * 1024 * 1024
@@ -57,6 +59,44 @@ def rotate_log(path):
             os.replace(source, f"{path}.{index + 1}")
     if os.path.exists(path):
         os.replace(path, f"{path}.1")
+
+
+def acquire_single_instance_lock():
+    """Hold an exclusive lock for as long as this supervisor lives.
+
+    A pid file alone cannot answer "is it still running": after a power cut the
+    recorded number is eventually reissued to an unrelated process, which made
+    the app report a dead installation as healthy. It also could not stop a
+    second supervisor from starting and applying a queued database restore
+    underneath the first one's live services. The kernel releases this lock when
+    the process dies, however it dies.
+    """
+    os.makedirs(RUNTIME_DIR, exist_ok=True)
+    handle = open(LOCK_PATH, "a+")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"{os.getpid()}\n")
+    handle.flush()
+    return handle
+
+
+def another_supervisor_is_running():
+    """Whether a live supervisor holds the lock right now."""
+    try:
+        with open(LOCK_PATH, "a+") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True
+            fcntl.flock(handle, fcntl.LOCK_UN)
+    except OSError:
+        return False
+    return False
 
 
 def write_pid():
@@ -309,6 +349,14 @@ class ManagedProcess:
 
 def main():
     os.makedirs(LOG_DIR, exist_ok=True)
+    lock = acquire_single_instance_lock()
+    if lock is None:
+        print(
+            "[SUPERVISOR] Another Radio Command Center supervisor is already "
+            "running; leaving it alone.",
+            flush=True,
+        )
+        return
     write_pid()
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
