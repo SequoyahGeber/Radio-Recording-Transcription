@@ -12,7 +12,12 @@ import threading
 import time
 from datetime import datetime, timedelta
 
-from backend.backups import BACKUP_DIR, create_backup, list_backups
+from backend.backups import (
+    BACKUP_DIR,
+    adopt_pre_update_snapshot,
+    create_backup,
+    list_backups,
+)
 from backend.config import LOG_DIR, number_setting
 from backend.database import connect
 
@@ -140,6 +145,9 @@ def scheduled_backup_if_due():
 def run_maintenance_once(logger=None):
     results = {}
     for name, action in (
+        # An update's recovery snapshot becomes an ordinary backup, so it can
+        # actually be restored rather than just promised.
+        ("update_snapshot", adopt_pre_update_snapshot),
         ("backup", scheduled_backup_if_due),
         ("history", prune_history),
         ("logs", prune_rotated_logs),

@@ -156,6 +156,84 @@ def verify_backup(backup_id):
     return next(item for item in list_backups() if item["id"] == int(backup_id))
 
 
+UPDATE_SNAPSHOT_DIR = os.path.join(DATA_DIR, "update-backups", "user-data-before-update")
+SNAPSHOT_ADOPTED_MARKER = os.path.join(UPDATE_SNAPSHOT_DIR, ".adopted-as-backup")
+
+
+def adopt_pre_update_snapshot():
+    """Turn the snapshot taken before an app update into a real backup.
+
+    Every update copies the database, security profiles and settings aside and
+    the app tells the operator a recovery copy was saved. Nothing could read it:
+    there was no control anywhere to restore from it, so the promise was empty.
+    Adopting it into the ordinary backup list means it can be verified, drilled
+    and restored with everything else.
+    """
+    databases = os.path.join(UPDATE_SNAPSHOT_DIR, "databases")
+    if os.path.exists(SNAPSHOT_ADOPTED_MARKER) or not os.path.isdir(databases):
+        return None
+    candidates = [
+        os.path.join(databases, name)
+        for name in sorted(os.listdir(databases))
+        if name.endswith(".db")
+    ]
+    if not candidates:
+        return None
+    preferred = os.path.join(databases, os.path.basename(DB_NAME))
+    source = preferred if os.path.isfile(preferred) else candidates[-1]
+
+    os.makedirs(BACKUP_DIR, mode=0o700, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    destination = os.path.join(BACKUP_DIR, f"{stamp}-before-update")
+    os.makedirs(destination, mode=0o700)
+    database_path = os.path.join(destination, "radio-command-center.db")
+    try:
+        shutil.copy2(source, database_path)
+        os.chmod(database_path, 0o600)
+        with sqlite3.connect(f"file:{database_path}?mode=ro", uri=True) as check:
+            integrity = check.execute("PRAGMA quick_check").fetchone()[0]
+            transcript_count = check.execute(
+                "SELECT count(*) FROM transcripts"
+            ).fetchone()[0]
+        if integrity != "ok":
+            raise RuntimeError(f"The update snapshot is unreadable: {integrity}")
+        for name in ("settings.json", "security.json"):
+            copied_source = os.path.join(UPDATE_SNAPSHOT_DIR, name)
+            if name == "security.json":
+                copied_source = os.path.join(UPDATE_SNAPSHOT_DIR, "security", name)
+            if os.path.isfile(copied_source):
+                copied = os.path.join(destination, name)
+                shutil.copy2(copied_source, copied)
+                os.chmod(copied, 0o600)
+        checksum = _sha256(database_path)
+        created_at = datetime.fromtimestamp(os.path.getmtime(source)).isoformat()
+        with connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO backup_history(
+                    backup_path, status, database_bytes, transcript_count,
+                    sha256, created_by, created_at, verified_at
+                ) VALUES (?, 'verified', ?, ?, ?, 'app update', ?, ?)
+                """,
+                (
+                    destination,
+                    os.path.getsize(database_path),
+                    transcript_count,
+                    checksum,
+                    created_at,
+                    datetime.now().isoformat(),
+                ),
+            )
+            backup_id = cursor.lastrowid
+            connection.commit()
+        with open(SNAPSHOT_ADOPTED_MARKER, "w", encoding="utf-8") as handle:
+            handle.write(f"{backup_id}\n")
+        return next(item for item in list_backups() if item["id"] == backup_id)
+    except Exception:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+
+
 RESTORE_REQUEST_PATH = os.path.join(RUNTIME_DIR, "restore-request.json")
 
 

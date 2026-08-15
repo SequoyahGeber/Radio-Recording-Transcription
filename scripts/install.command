@@ -65,6 +65,20 @@ fi
 ./venv/bin/python -c "import fastapi, uvicorn, faster_whisper, mlx_whisper, av, numpy, watchdog, requests, pydantic, aiofiles"
 
 echo "[4/5] Building the Mac launcher app..."
+# The launcher is compiled with swiftc, which ships with the Xcode command line
+# tools. Checking now beats failing several minutes in with a raw toolchain
+# error, and the Homebrew path installs them only as a side effect.
+if ! /usr/bin/xcrun --find swiftc >/dev/null 2>&1; then
+    echo ""
+    echo "The Xcode command line tools are required to build the Mac app."
+    echo "Install them with:"
+    echo ""
+    echo "    xcode-select --install"
+    echo ""
+    echo "Then run this installer again. Everything installed so far is kept."
+    read -r -p "Press Return to close..."
+    exit 1
+fi
 chmod +x scripts/build_app.command
 ./scripts/build_app.command
 

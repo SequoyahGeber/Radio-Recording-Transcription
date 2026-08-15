@@ -258,7 +258,9 @@ DMG filename, bundle version, and release tag must match exactly.
 ## Operations and recovery
 
 Verified backups are taken automatically on the configured interval, and older
-ones are pruned to the retention count. A backup can be restored from
+ones are pruned to the retention count. The snapshot taken before an app update
+joins the same list, so the recovery copy an update promises can actually be
+used. A backup can be restored from
 **Deployment & recovery** in the dashboard controls: the dashboard verifies it,
 queues the restore, and restarts the services, because the archive cannot be
 replaced while the dashboard, worker, and sync process hold it open. The
