@@ -4,6 +4,9 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+import json
+
+from scripts import app_updater
 from scripts.app_updater import (
     UpdateError,
     ensure_preservation_boundary,
@@ -133,3 +136,67 @@ class PreservationBoundaryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PinnedVersionTests(unittest.TestCase):
+    """An install must deliver the version the operator agreed to."""
+
+    def test_the_confirmed_version_is_fetched_by_tag_not_by_latest(self):
+        requested = []
+
+        def fake_request(url, timeout=30):
+            requested.append(url)
+            return json.dumps(
+                {
+                    "tag_name": "v1.4.3",
+                    "name": "Radio Command Center 1.4.3",
+                    "assets": [
+                        {
+                            "name": "Radio-Command-Center-1.4.3-arm64.dmg",
+                            "browser_download_url": "https://example.invalid/a.dmg",
+                            "size": 1024,
+                            "digest": "sha256:" + "b" * 64,
+                        }
+                    ],
+                }
+            ).encode("utf-8")
+
+        with mock.patch.object(app_updater, "request_bytes", fake_request):
+            status = app_updater.require_update(
+                "1.4.1", app_updater.DEFAULT_REPOSITORY, expected_version="1.4.3"
+            )
+
+        self.assertEqual(status["latest_version"], "1.4.3")
+        self.assertTrue(
+            requested and requested[0].endswith("/releases/tags/v1.4.3"),
+            f"expected a by-tag fetch, got {requested}",
+        )
+        self.assertNotIn(
+            "/releases/latest",
+            "".join(requested),
+            "resolving latest again is what handed over the wrong version",
+        )
+
+    def test_an_unpinned_check_still_uses_latest(self):
+        requested = []
+
+        def fake_request(url, timeout=30):
+            requested.append(url)
+            return json.dumps(
+                {
+                    "tag_name": "v1.4.3",
+                    "assets": [
+                        {
+                            "name": "Radio-Command-Center-1.4.3-arm64.dmg",
+                            "browser_download_url": "https://example.invalid/a.dmg",
+                            "size": 1024,
+                            "digest": "sha256:" + "c" * 64,
+                        }
+                    ],
+                }
+            ).encode("utf-8")
+
+        with mock.patch.object(app_updater, "request_bytes", fake_request):
+            app_updater.release_status("1.4.1", app_updater.DEFAULT_REPOSITORY)
+
+        self.assertTrue("".join(requested).endswith("/releases/latest"))

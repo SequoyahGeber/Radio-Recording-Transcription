@@ -126,6 +126,27 @@ def find_release_assets(release):
     return latest_version, dmg_asset, checksum_asset, digest
 
 
+def release_by_tag(repository, version):
+    """Fetch one published release by version, rather than whatever is latest.
+
+    GitHub serves /releases/latest through a cache, so two calls seconds apart
+    can disagree. The update check and the install were separate calls, which
+    let an operator be offered one version and handed another.
+    """
+    repository = validate_repository(repository)
+    tag = version if str(version).startswith("v") else f"v{version}"
+    payload = request_bytes(
+        f"https://api.github.com/repos/{repository}/releases/tags/{tag}"
+    )
+    try:
+        release = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UpdateError("GitHub returned an invalid release response") from exc
+    if not isinstance(release, dict) or release.get("draft") or release.get("prerelease"):
+        raise UpdateError(f"Release {tag} is not a stable published release")
+    return release
+
+
 def release_status(current_version, repository=DEFAULT_REPOSITORY, release=None):
     release = release or latest_release(repository)
     latest_version, dmg_asset, checksum_asset, digest = find_release_assets(release)
@@ -150,8 +171,9 @@ def release_status(current_version, repository=DEFAULT_REPOSITORY, release=None)
     }
 
 
-def require_update(current_version, repository):
-    status = release_status(current_version, repository)
+def require_update(current_version, repository, expected_version=""):
+    release = release_by_tag(repository, expected_version) if expected_version else None
+    status = release_status(current_version, repository, release=release)
     if status["status"] != "available":
         raise UpdateError(
             f"Version {status['current_version']} is already current"
@@ -314,7 +336,9 @@ def atomic_json(path, payload):
         raise
 
 
-def prepare_update(current_version, repository, app_path, data_dir):
+def prepare_update(
+    current_version, repository, app_path, data_dir, expected_version=""
+):
     if sys.platform != "darwin":
         raise UpdateError("Application updates are supported only on macOS")
     app_path, data_dir = ensure_preservation_boundary(app_path, data_dir)
@@ -324,7 +348,14 @@ def prepare_update(current_version, repository, app_path, data_dir):
     if parse_version(current_metadata["version"]) != parse_version(current_version):
         raise UpdateError("The running application version does not match its bundle")
 
-    status = require_update(current_version, repository)
+    status = require_update(current_version, repository, expected_version)
+    if expected_version and status["latest_version"] != normalized_version(
+        expected_version
+    ):
+        raise UpdateError(
+            "The available version changed while the update was being confirmed. "
+            "Check for updates again."
+        )
     check_free_space(data_dir, status["asset"]["size"])
     update_root = os.path.join(
         data_dir, "updates", f"staged-{status['latest_version']}"
@@ -493,6 +524,7 @@ def build_parser():
     prepare_parser.add_argument("--repository", default=DEFAULT_REPOSITORY)
     prepare_parser.add_argument("--app-path", required=True)
     prepare_parser.add_argument("--data-dir", required=True)
+    prepare_parser.add_argument("--expected-version", default="")
 
     launch_parser = subparsers.add_parser("launch")
     launch_parser.add_argument("--manifest", required=True)
@@ -510,6 +542,7 @@ def main():
             args.repository,
             args.app_path,
             args.data_dir,
+            expected_version=args.expected_version,
         )
     else:
         result = launch_update(args.manifest, args.current_pid)

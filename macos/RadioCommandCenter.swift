@@ -704,14 +704,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             alert.addButton(withTitle: "Download & Install")
             alert.addButton(withTitle: "Later")
             if alert.runModal() == .alertFirstButtonReturn {
-                self.prepareUpdate()
+                self.prepareUpdate(expecting: latestVersion)
             } else {
                 self.refreshStatus()
             }
         }
     }
 
-    private func prepareUpdate() {
+    private func prepareUpdate(expecting expectedVersion: String) {
         updateCheckInFlight = true
         updateButton.isEnabled = false
         updateButton.title = "Downloading…"
@@ -728,6 +728,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 "--repository", updateRepository,
                 "--app-path", Bundle.main.bundleURL.path,
                 "--data-dir", applicationDataURL.path,
+                // Install the version that was offered, not whatever GitHub
+                // reports as latest a moment later.
+                "--expected-version", expectedVersion,
             ]
         ) { [weak self] value in
             guard let self else { return }
