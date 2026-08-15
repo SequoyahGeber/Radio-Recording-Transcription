@@ -122,7 +122,13 @@ const INITIAL_ARCHIVE_LIMIT = 100;
 const ARCHIVE_PAGE_SIZE = 100;
 const ARCHIVE_FETCH_LIMIT = ARCHIVE_PAGE_SIZE + 1;
 const ARCHIVE_RENDER_BATCH_SIZE = 20;
-const MAX_LIVE_RENDERED_TRANSMISSIONS = 300;
+// A modern browser handles a few thousand of these comfortably. The old cap of
+// 300 across every feed left roughly thirty per column, so scrolling up to read
+// history immediately collided with the pruner.
+const MAX_LIVE_RENDERED_TRANSMISSIONS = Math.max(
+  300,
+  Number(localStorage.getItem("radioMaxRenderedTransmissions")) || 1500,
+);
 const storedHiddenChannels = readStoredJSON("radioHiddenChannels", []);
 const hiddenChannels = new Set(
   Array.isArray(storedHiddenChannels) ? storedHiddenChannels : [],
@@ -1237,7 +1243,17 @@ function pruneOldestRenderedTranscripts() {
   const excess = cards.length - MAX_LIVE_RENDERED_TRANSMISSIONS;
   if (excess <= 0) return;
 
-  cards
+  // Never take messages out from under someone who has scrolled up to read
+  // them. A feed that has been scrolled away from the newest message keeps
+  // everything it has; only feeds still following live traffic are trimmed.
+  const prunable = cards.filter((card) => {
+    const container = card.closest(".messages-container");
+    if (!container) return true;
+    return Boolean(autoScrollState[container.id.replace(/^msgs-/, "")]);
+  });
+  if (!prunable.length) return;
+
+  const removed = prunable
     .sort(
       (left, right) =>
         Number(left.dataset.recordedAt || 0) -
@@ -1245,23 +1261,38 @@ function pruneOldestRenderedTranscripts() {
         Number(left.dataset.transcriptId || 0) -
           Number(right.dataset.transcriptId || 0),
     )
-    .slice(0, excess)
-    .forEach((card) => {
-      processedMessages.delete(card.dataset.filename);
-      const audio = card.querySelector("audio");
-      if (audio) {
-        audio.pause();
-        audio.removeAttribute("src");
-      }
-      card.remove();
-    });
+    .slice(0, Math.min(excess, prunable.length));
+  const containers = removed
+    .map((card) => card.closest(".messages-container"))
+    .filter(Boolean);
+  removed.forEach((card) => {
+    processedMessages.delete(card.dataset.filename);
+    const audio = card.querySelector("audio");
+    if (audio) {
+      audio.pause();
+      audio.removeAttribute("src");
+    }
+    card.remove();
+  });
 
+  // Only the feeds that actually lost a card have more history to offer, and
+  // each is held off briefly. Flagging every feed and inviting an immediate
+  // refetch turned a busy backlog into a loop: the new cards overflowed the
+  // render cap, were pruned, prompted a reload of the same page, and the
+  // columns visibly jittered as the count bounced.
+  const trimmedContainers = new Set(containers);
   document.querySelectorAll(".messages-container").forEach((container) => {
     refreshFeedCursor(container);
-    historyStateFor(container.id.replace(/^msgs-/, "")).hasMore = true;
   });
-  hasMoreHistory = true;
+  trimmedContainers.forEach((container) => {
+    const state = historyStateFor(container.id.replace(/^msgs-/, ""));
+    state.hasMore = true;
+    state.suppressUntil = Math.max(state.suppressUntil, Date.now() + 2000);
+  });
+  if (trimmedContainers.size) hasMoreHistory = true;
 }
+
+window.pruneOldestRenderedTranscripts = pruneOldestRenderedTranscripts;
 
 function archiveQueryParameters(options = {}) {
   const parameters = new URLSearchParams();

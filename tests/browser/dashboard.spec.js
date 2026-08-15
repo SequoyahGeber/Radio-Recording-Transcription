@@ -778,3 +778,37 @@ test("the dashboard signs itself in when it carries the Mac app key", async ({
   await expect(page.locator("#settings-button")).toBeVisible();
   await context.close();
 });
+
+test("scrolling up to read history is never interrupted by the render cap", async ({
+  page,
+}) => {
+  await signIn(page);
+
+  const medical = page.locator('.channel-column[data-channel="Medical"]');
+  const scroller = medical.locator(".messages-container");
+  await scroller.evaluate((container) => {
+    container.scrollTop = 0;
+  });
+  await expect
+    .poll(() => medical.locator(".message-card").count())
+    .toBeGreaterThan(12);
+
+  const before = await medical.locator(".message-card").count();
+  const firstId = await medical
+    .locator(".message-card[data-transcript-id]")
+    .first()
+    .getAttribute("data-transcript-id");
+
+  // Force the cap to bite while this feed is scrolled away from live traffic.
+  await page.evaluate(() => {
+    window.pruneOldestRenderedTranscripts?.();
+    for (let index = 0; index < 5; index += 1) {
+      window.pruneOldestRenderedTranscripts?.();
+    }
+  });
+
+  await expect(medical.locator(".message-card")).toHaveCount(before);
+  await expect(
+    medical.locator(".message-card[data-transcript-id]").first(),
+  ).toHaveAttribute("data-transcript-id", firstId);
+});
