@@ -33,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var automaticUpdateChecked = false
     private var transcriptionEnabled = true
     private var settingsRequested = false
+    private var updateProgressPanel: NSPanel?
     private var menuStatusItem: NSStatusItem?
     private let collapsedHeaderHeight: CGFloat = 46
     private let expandedHeaderHeight: CGFloat = 104
@@ -551,6 +552,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         alert.runModal()
     }
 
+    /// A small window shown while the update downloads.
+    ///
+    /// The only previous feedback was the status line inside App Controls,
+    /// which is collapsed by default: pressing Download & Install appeared to
+    /// do nothing at all until the install prompt arrived a minute later.
+    private func showUpdateProgress(_ message: String) {
+        if updateProgressPanel == nil {
+            let panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 420, height: 118),
+                styleMask: [.titled, .hudWindow, .utilityWindow],
+                backing: .buffered,
+                defer: false
+            )
+            panel.title = "Software Update"
+            panel.isReleasedWhenClosed = false
+            panel.hidesOnDeactivate = false
+
+            let spinner = NSProgressIndicator(
+                frame: NSRect(x: 24, y: 46, width: 24, height: 24)
+            )
+            spinner.style = .spinning
+            spinner.isIndeterminate = true
+            spinner.startAnimation(nil)
+            panel.contentView?.addSubview(spinner)
+
+            let text = label("", size: 12)
+            text.frame = NSRect(x: 60, y: 34, width: 336, height: 48)
+            text.maximumNumberOfLines = 3
+            text.lineBreakMode = .byWordWrapping
+            text.identifier = NSUserInterfaceItemIdentifier("updateProgressText")
+            panel.contentView?.addSubview(text)
+
+            panel.center()
+            updateProgressPanel = panel
+        }
+        (updateProgressPanel?.contentView?.subviews.first {
+            $0.identifier?.rawValue == "updateProgressText"
+        } as? NSTextField)?.stringValue = message
+        updateProgressPanel?.makeKeyAndOrderFront(nil)
+    }
+
+    private func hideUpdateProgress() {
+        updateProgressPanel?.orderOut(nil)
+    }
+
     /// A fixed-size scrolling box for release notes, with the plainest of
     /// Markdown removed so headings and emphasis read as text rather than
     /// punctuation.
@@ -594,6 +640,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         updateButton.isEnabled = false
         updateButton.title = "Checking…"
         statusLabel.stringValue = "Checking GitHub for updates…"
+        if manual {
+            showUpdateProgress("Checking for a newer version…")
+        }
 
         runUpdater(
             [
@@ -606,6 +655,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             self.updateCheckInFlight = false
             self.updateButton.isEnabled = true
             self.updateButton.title = "Updates"
+            self.hideUpdateProgress()
 
             guard let value else {
                 if manual {
@@ -666,6 +716,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         updateButton.isEnabled = false
         updateButton.title = "Downloading…"
         statusLabel.stringValue = "Downloading and verifying the update…"
+        showUpdateProgress(
+            "Downloading Radio Command Center and checking it is genuine.\n"
+                + "This takes a minute or two on a typical connection."
+        )
 
         runUpdater(
             [
@@ -680,6 +734,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             self.updateCheckInFlight = false
             self.updateButton.isEnabled = true
             self.updateButton.title = "Updates"
+            self.hideUpdateProgress()
 
             guard
                 let value,
