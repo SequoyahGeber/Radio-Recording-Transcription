@@ -2,6 +2,7 @@ import json
 import re
 from datetime import datetime, timedelta
 
+from backend.config import number_setting
 from backend.events import record_event
 
 
@@ -306,6 +307,21 @@ def evaluate_transcript_alerts(connection, transcript, actor="system"):
         """
     ).fetchall()
     now = datetime.now()
+    # An installation catching up on a backlog, or importing an archive, would
+    # otherwise raise fresh alerts for traffic that is months old.
+    ignore_older_than = number_setting(
+        "alert_min_recording_age_minutes", default=0, minimum=0, maximum=525600
+    )
+    if ignore_older_than:
+        air_time = transcript_air_time(transcript)
+        if air_time:
+            try:
+                if datetime.fromisoformat(air_time) < now - timedelta(
+                    minutes=ignore_older_than
+                ):
+                    return [], []
+            except ValueError:
+                pass
     created_alerts = []
     created_events = []
     for row in rows:

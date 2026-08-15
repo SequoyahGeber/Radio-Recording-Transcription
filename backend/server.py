@@ -52,6 +52,7 @@ from backend.maintenance import start_maintenance_thread
 from backend.settings_api import apply_settings, settings_document
 from backend.config import (
     AUDIO_DIR,
+    bool_setting,
     DB_NAME,
     LOG_DIR,
     PROJECT_ROOT,
@@ -149,11 +150,18 @@ ESCALATION_SWEEP_SECONDS = 20
 def escalate_overdue_alerts():
     """Mark alerts that have gone unanswered for longer than their rule allows.
 
-    Rules have carried an escalation time and a "requires acknowledgement" flag
-    since they were introduced, and nothing ever acted on either: an alert
-    nobody acknowledged at 02:00 looked exactly like one that had been handled.
+    Only transmissions that are still current can be escalated. Importing an
+    archive, or catching up on a backlog, raises alerts on recordings that are
+    months old; escalating those announced a stream of "unanswered emergencies"
+    for traffic that was history long before anyone could answer it.
     """
+    if not bool_setting("alert_escalation_enabled", default=True):
+        return []
     now = datetime.now()
+    freshness_minutes = number_setting(
+        "escalation_max_age_minutes", default=120, minimum=1, maximum=10080
+    )
+    cutoff = (now - timedelta(minutes=freshness_minutes)).isoformat()
     escalated = []
     with connect() as connection:
         rows = connection.execute(
@@ -165,12 +173,13 @@ def escalate_overdue_alerts():
             WHERE ae.status = 'open'
               AND ae.escalated_at IS NULL
               AND ar.escalation_seconds > 0
+              AND coalesce(t.recorded_at, t.timestamp) >= ?
               AND datetime(ae.created_at) <=
                   datetime(?, '-' || ar.escalation_seconds || ' seconds')
             ORDER BY ae.id ASC
             LIMIT 50
             """,
-            (now.isoformat(),),
+            (cutoff, now.isoformat()),
         ).fetchall()
         for row in rows:
             alert = alert_row_to_dict(row)

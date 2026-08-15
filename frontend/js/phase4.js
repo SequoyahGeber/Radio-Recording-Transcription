@@ -472,6 +472,17 @@ async function phaseFourTestRule() {
   }
 }
 
+function phaseFourAlertsAudible(alert) {
+  // One switch governs both the browser notification and the on-screen toast.
+  const preferences = phaseFourState.notificationPreferences;
+  if (preferences.browser_enabled === false) return false;
+  if (!notificationsEnabled) return false;
+  const minimum = preferences.minimum_severity || "urgent";
+  return (
+    phaseFourSeverityOrder[alert.severity] >= phaseFourSeverityOrder[minimum]
+  );
+}
+
 function phaseFourRecordDelivery(alert, status) {
   fetch(`/api/alerts/${alert.id}/delivery`, {
     method: "POST",
@@ -525,6 +536,7 @@ function phaseFourPlayAlertTone(severity) {
 
 function phaseFourNotifyAlert(alert) {
   const preferences = phaseFourState.notificationPreferences;
+  if (preferences.browser_enabled === false) return;
   const minimum = preferences.minimum_severity || "urgent";
   const loudEnough =
     phaseFourSeverityOrder[alert.severity] >= phaseFourSeverityOrder[minimum];
@@ -566,7 +578,11 @@ window.phaseFourHandleEvent = function (event) {
     if (!alert) return;
     if (!event.replayed) {
       phaseFourNotifyAlert(alert);
-      showToast(`${alert.severity.toUpperCase()}: ${alert.rule_name}`, "danger");
+      // The on-screen toast used to appear even with alert notifications
+      // switched off, so turning them off silenced nothing on this screen.
+      if (phaseFourAlertsAudible(alert)) {
+        showToast(`${alert.severity.toUpperCase()}: ${alert.rule_name}`, "danger");
+      }
     }
     phaseFourLoadSummary().catch(() => {});
     if (!phaseFourView.hidden) phaseFourLoadAlerts().catch(() => {});
@@ -575,10 +591,12 @@ window.phaseFourHandleEvent = function (event) {
     if (alert && !event.replayed) {
       // An alert nobody answered in time deserves a second, louder prompt.
       phaseFourNotifyAlert(alert);
-      showToast(
-        `ESCALATED: ${alert.rule_name} is still unanswered`,
-        "danger",
-      );
+      if (phaseFourAlertsAudible(alert)) {
+        showToast(
+          `ESCALATED: ${alert.rule_name} is still unanswered`,
+          "danger",
+        );
+      }
     }
     phaseFourLoadSummary().catch(() => {});
     if (!phaseFourView.hidden) phaseFourLoadAlerts().catch(() => {});

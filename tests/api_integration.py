@@ -1815,7 +1815,8 @@ class SettingsApiTests(unittest.TestCase):
         document = response.json()
         group_ids = {group["id"] for group in document["groups"]}
         self.assertEqual(
-            group_ids, {"recording", "transcription", "access", "storage"}
+            group_ids,
+            {"recording", "transcription", "alerts", "access", "storage"},
         )
         keys = {
             field["key"]
@@ -1905,6 +1906,7 @@ class AlertEscalationTests(unittest.TestCase):
     def test_an_unanswered_alert_escalates_once_and_an_answered_one_does_not(self):
         stamp = secrets.token_hex(4)
         overdue = (datetime.now() - timedelta(minutes=5)).isoformat()
+        recorded_at = (datetime.now() - timedelta(minutes=6)).isoformat()
         with connect() as connection:
             rule_id = connection.execute(
                 """
@@ -1926,10 +1928,10 @@ class AlertEscalationTests(unittest.TestCase):
                     INSERT INTO transcripts(
                         timestamp, recorded_at, channel, filename, transcript_text,
                         raw_transcript_text, quality_score, quality_reason, status
-                    ) VALUES ('2026-08-02T02:00:00', '2026-08-02T02:00:00', 'Medical',
+                    ) VALUES (?, ?, 'Medical',
                               ?, 'escalate now', 'escalate now', 1.0, '', 'ready')
                     """,
-                    (f"Escalate/{stamp}-{label}.mp3",),
+                    (recorded_at, recorded_at, f"Escalate/{stamp}-{label}.mp3"),
                 ).lastrowid
                 alert_ids[label] = connection.execute(
                     """
@@ -1978,6 +1980,71 @@ class AlertEscalationTests(unittest.TestCase):
                     (f"Escalate/{stamp}-%",),
                 )
                 connection.commit()
+
+    def test_a_backlog_of_old_recordings_is_never_chased(self):
+        """Catching up on an archive must not announce historical emergencies."""
+        stamp = secrets.token_hex(4)
+        raised = (datetime.now() - timedelta(minutes=5)).isoformat()
+        recorded_last_year = "2025-07-22T16:06:24"
+        with connect() as connection:
+            rule_id = connection.execute(
+                """
+                INSERT INTO alert_rules(
+                    name, severity, match_mode, terms_json, exclusions_json,
+                    channel_scope_json, active, cooldown_seconds,
+                    escalation_seconds, requires_ack, created_by, updated_by,
+                    created_at, updated_at, version
+                ) VALUES (?, 'critical', 'word', '["backlog"]', '[]', '[]', 1, 0,
+                          60, 1, 'test', 'test', '2026-08-01T00:00:00',
+                          '2026-08-01T00:00:00', 1)
+                """,
+                (f"Backlog rule {stamp}",),
+            ).lastrowid
+            transcript_id = connection.execute(
+                """
+                INSERT INTO transcripts(
+                    timestamp, recorded_at, channel, filename, transcript_text,
+                    raw_transcript_text, quality_score, quality_reason, status
+                ) VALUES (?, ?, 'Medical', ?, 'backlog traffic',
+                          'backlog traffic', 1.0, '', 'ready')
+                """,
+                (raised, recorded_last_year, f"Escalate/{stamp}-old.mp3"),
+            ).lastrowid
+            alert_id = connection.execute(
+                """
+                INSERT INTO alert_events(
+                    transcript_id, rule_id, severity, matched_text, explanation,
+                    status, version, created_at, updated_at
+                ) VALUES (?, ?, 'critical', 'backlog', 'test', 'open', 1, ?, ?)
+                """,
+                (transcript_id, rule_id, raised, raised),
+            ).lastrowid
+            connection.commit()
+        try:
+            escalated = {event["resource_id"] for event in escalate_overdue_alerts()}
+            self.assertNotIn(
+                alert_id,
+                escalated,
+                "a transmission recorded last year is not an unanswered emergency",
+            )
+        finally:
+            with connect() as connection:
+                connection.execute(
+                    "DELETE FROM alert_events WHERE rule_id = ?", (rule_id,)
+                )
+                connection.execute("DELETE FROM alert_rules WHERE id = ?", (rule_id,))
+                connection.execute(
+                    "DELETE FROM transcripts WHERE filename LIKE ?",
+                    (f"Escalate/{stamp}-%",),
+                )
+                connection.commit()
+
+    def test_chasing_can_be_switched_off_entirely(self):
+        save_settings({"alert_escalation_enabled": False})
+        try:
+            self.assertEqual(escalate_overdue_alerts(), [])
+        finally:
+            save_settings({"alert_escalation_enabled": True})
 
 
 class AlertDeliveryRecordTests(unittest.TestCase):

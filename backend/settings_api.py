@@ -217,6 +217,52 @@ SETTINGS_GROUPS = [
         ],
     },
     {
+        "id": "alerts",
+        "title": "Alerts",
+        "summary": "How insistently the dashboard tells you about flagged transmissions.",
+        "fields": [
+            {
+                "key": "alert_escalation_enabled",
+                "label": "Chase unanswered alerts",
+                "help": (
+                    "Re-announce a critical alert nobody has acknowledged. Turn "
+                    "this off to be told about each alert exactly once."
+                ),
+                "type": "boolean",
+                "default": True,
+                "restart": "none",
+            },
+            {
+                "key": "escalation_max_age_minutes",
+                "label": "Only chase transmissions newer than",
+                "help": (
+                    "Alerts raised while catching up on a backlog are about "
+                    "traffic that is already history, so they are never chased."
+                ),
+                "type": "integer",
+                "default": 120,
+                "minimum": 1,
+                "maximum": 10080,
+                "unit": "minutes",
+                "restart": "none",
+            },
+            {
+                "key": "alert_min_recording_age_minutes",
+                "label": "Ignore transmissions older than",
+                "help": (
+                    "Raise no alerts at all for recordings older than this. 0 "
+                    "alerts on everything, including imported archives."
+                ),
+                "type": "integer",
+                "default": 0,
+                "minimum": 0,
+                "maximum": 525600,
+                "unit": "minutes",
+                "restart": "none",
+            },
+        ],
+    },
+    {
         "id": "access",
         "title": "Network and sign-in",
         "summary": "How this Mac serves the dashboard and how people sign in to it.",
