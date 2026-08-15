@@ -258,6 +258,19 @@ def initialize_database():
             )
             """
         )
+        alert_event_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(alert_events)")
+        }
+        if alert_event_columns and "escalated_at" not in alert_event_columns:
+            try:
+                connection.execute(
+                    "ALTER TABLE alert_events ADD COLUMN escalated_at TEXT"
+                )
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+
         existing_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(transcripts)")
         }
@@ -437,6 +450,7 @@ def initialize_database():
                 resolved_by TEXT,
                 resolved_at TEXT,
                 resolution_note TEXT NOT NULL DEFAULT '',
+                escalated_at TEXT,
                 version INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -446,6 +460,8 @@ def initialize_database():
             );
             CREATE INDEX IF NOT EXISTS idx_alert_events_status_severity
                 ON alert_events(status, severity, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_alert_events_open
+                ON alert_events(status, created_at);
             CREATE INDEX IF NOT EXISTS idx_alert_events_transcript
                 ON alert_events(transcript_id, id DESC);
 

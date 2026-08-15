@@ -32,6 +32,7 @@ from backend.backups import apply_pending_restore, pending_restore, request_rest
 from backend.config import DB_NAME, LOG_DIR, load_settings, save_settings
 from backend.database import connect
 from backend.maintenance import prune_history
+from backend.server import escalate_overdue_alerts
 from backend.security import (
     create_session_token,
     ensure_app_key,
@@ -1896,6 +1897,87 @@ class SettingsApiTests(unittest.TestCase):
             viewer.put("/api/settings", json={"values": {"port": 9000}}).status_code,
             403,
         )
+
+
+class AlertEscalationTests(unittest.TestCase):
+    """An alert nobody answers has to become visibly different."""
+
+    def test_an_unanswered_alert_escalates_once_and_an_answered_one_does_not(self):
+        stamp = secrets.token_hex(4)
+        overdue = (datetime.now() - timedelta(minutes=5)).isoformat()
+        with connect() as connection:
+            rule_id = connection.execute(
+                """
+                INSERT INTO alert_rules(
+                    name, severity, match_mode, terms_json, exclusions_json,
+                    channel_scope_json, active, cooldown_seconds,
+                    escalation_seconds, requires_ack, created_by, updated_by,
+                    created_at, updated_at, version
+                ) VALUES (?, 'critical', 'word', '["escalate"]', '[]', '[]', 1, 0,
+                          60, 1, 'test', 'test', '2026-08-01T00:00:00',
+                          '2026-08-01T00:00:00', 1)
+                """,
+                (f"Escalation rule {stamp}",),
+            ).lastrowid
+            alert_ids = {}
+            for label, status in (("open", "open"), ("acknowledged", "acknowledged")):
+                transcript_id = connection.execute(
+                    """
+                    INSERT INTO transcripts(
+                        timestamp, recorded_at, channel, filename, transcript_text,
+                        raw_transcript_text, quality_score, quality_reason, status
+                    ) VALUES ('2026-08-02T02:00:00', '2026-08-02T02:00:00', 'Medical',
+                              ?, 'escalate now', 'escalate now', 1.0, '', 'ready')
+                    """,
+                    (f"Escalate/{stamp}-{label}.mp3",),
+                ).lastrowid
+                alert_ids[label] = connection.execute(
+                    """
+                    INSERT INTO alert_events(
+                        transcript_id, rule_id, severity, matched_text, explanation,
+                        status, version, created_at, updated_at
+                    ) VALUES (?, ?, 'critical', 'escalate', 'test', ?, 1, ?, ?)
+                    """,
+                    (transcript_id, rule_id, status, overdue, overdue),
+                ).lastrowid
+            connection.commit()
+
+        try:
+            events = escalate_overdue_alerts()
+            escalated_ids = {event["resource_id"] for event in events}
+            self.assertIn(alert_ids["open"], escalated_ids)
+            self.assertNotIn(
+                alert_ids["acknowledged"],
+                escalated_ids,
+                "an acknowledged alert has already been answered",
+            )
+            self.assertEqual(
+                [
+                    event
+                    for event in escalate_overdue_alerts()
+                    if event["resource_id"] in alert_ids.values()
+                ],
+                [],
+                "escalation must happen once, not on every sweep",
+            )
+            with connect(read_only=True) as connection:
+                row = connection.execute(
+                    "SELECT escalated_at, status FROM alert_events WHERE id = ?",
+                    (alert_ids["open"],),
+                ).fetchone()
+            self.assertIsNotNone(row["escalated_at"])
+            self.assertEqual(row["status"], "open", "escalation is not a resolution")
+        finally:
+            with connect() as connection:
+                connection.execute(
+                    "DELETE FROM alert_events WHERE rule_id = ?", (rule_id,)
+                )
+                connection.execute("DELETE FROM alert_rules WHERE id = ?", (rule_id,))
+                connection.execute(
+                    "DELETE FROM transcripts WHERE filename LIKE ?",
+                    (f"Escalate/{stamp}-%",),
+                )
+                connection.commit()
 
 
 class DiagnosticsRedactionTests(unittest.TestCase):

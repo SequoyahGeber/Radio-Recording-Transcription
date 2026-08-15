@@ -506,6 +506,18 @@ window.phaseFourHandleEvent = function (event) {
     }
     phaseFourLoadSummary().catch(() => {});
     if (!phaseFourView.hidden) phaseFourLoadAlerts().catch(() => {});
+  } else if (event.type === "alert.escalated") {
+    const alert = event.payload?.alert;
+    if (alert && !event.replayed) {
+      // An alert nobody answered in time deserves a second, louder prompt.
+      phaseFourNotifyAlert(alert);
+      showToast(
+        `ESCALATED: ${alert.rule_name} is still unanswered`,
+        "danger",
+      );
+    }
+    phaseFourLoadSummary().catch(() => {});
+    if (!phaseFourView.hidden) phaseFourLoadAlerts().catch(() => {});
   } else if (event.type === "alert.updated") {
     phaseFourLoadSummary().catch(() => {});
     if (!phaseFourView.hidden) phaseFourLoadAlerts().catch(() => {});

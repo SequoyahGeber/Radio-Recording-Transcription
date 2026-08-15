@@ -1,3 +1,4 @@
+import asyncio
 import csv
 import io
 import json
@@ -140,6 +141,83 @@ def start_background_maintenance():
     # Backups, history pruning, log cleanup, and WAL checkpoints keep running
     # for as long as the dashboard does, not just once at startup.
     start_maintenance_thread(logger)
+
+
+ESCALATION_SWEEP_SECONDS = 20
+
+
+def escalate_overdue_alerts():
+    """Mark alerts that have gone unanswered for longer than their rule allows.
+
+    Rules have carried an escalation time and a "requires acknowledgement" flag
+    since they were introduced, and nothing ever acted on either: an alert
+    nobody acknowledged at 02:00 looked exactly like one that had been handled.
+    """
+    now = datetime.now()
+    escalated = []
+    with connect() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT {ALERT_DETAIL_SELECT}
+            FROM alert_events ae
+            JOIN alert_rules ar ON ar.id = ae.rule_id
+            JOIN transcripts t ON t.id = ae.transcript_id
+            WHERE ae.status = 'open'
+              AND ae.escalated_at IS NULL
+              AND ar.escalation_seconds > 0
+              AND datetime(ae.created_at) <=
+                  datetime(?, '-' || ar.escalation_seconds || ' seconds')
+            ORDER BY ae.id ASC
+            LIMIT 50
+            """,
+            (now.isoformat(),),
+        ).fetchall()
+        for row in rows:
+            alert = alert_row_to_dict(row)
+            connection.execute(
+                """
+                UPDATE alert_events
+                SET escalated_at = ?, updated_at = ?, version = version + 1
+                WHERE id = ? AND escalated_at IS NULL
+                """,
+                (now.isoformat(), now.isoformat(), alert["id"]),
+            )
+            alert["escalated_at"] = now.isoformat()
+            alert["version"] = alert["version"] + 1
+            event, _ = record_event(
+                connection,
+                "alert.escalated",
+                resource_type="alert",
+                resource_id=alert["id"],
+                actor="system",
+                payload={"alert": alert},
+                dedupe_key=f"alert.escalated:{alert['id']}",
+            )
+            escalated.append(event)
+        if escalated:
+            connection.commit()
+    return escalated
+
+
+@app.on_event("startup")
+async def start_alert_escalation():
+    if os.environ.get("RADIO_DISABLE_ALERT_ESCALATION") == "1":
+        return
+
+    async def sweep():
+        while True:
+            await asyncio.sleep(ESCALATION_SWEEP_SECONDS)
+            try:
+                events = await asyncio.to_thread(escalate_overdue_alerts)
+            except Exception:
+                logger.exception("Alert escalation sweep failed")
+                continue
+            # Broadcast from the loop that owns the sockets so operators see it
+            # without waiting for a reconnect.
+            for event in events:
+                await manager.broadcast(event)
+
+    asyncio.create_task(sweep())
 
 
 class ConnectionManager:
@@ -435,7 +513,7 @@ ALERT_DETAIL_SELECT = """
     ae.severity, ae.matched_text, ae.explanation, ae.status,
     ae.assigned_to, ae.acknowledged_by, ae.acknowledged_at,
     ae.resolved_by, ae.resolved_at, ae.resolution_note, ae.version,
-    ae.created_at, ae.updated_at, t.channel, t.recorded_at,
+    ae.escalated_at, ae.created_at, ae.updated_at, t.channel, t.recorded_at,
     t.transcript_text, ar.requires_ack, ar.escalation_seconds
 """
 

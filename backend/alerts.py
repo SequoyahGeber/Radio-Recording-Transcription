@@ -187,6 +187,11 @@ def rule_matches(rule, transcript):
     return list(dict.fromkeys(matches))
 
 
+def _optional(row, column):
+    """Read a column that older databases may not have yet."""
+    return row[column] if column in row.keys() else None
+
+
 def alert_row_to_dict(row):
     keys = set(row.keys())
     return {
@@ -198,6 +203,7 @@ def alert_row_to_dict(row):
         "matched_text": row["matched_text"],
         "explanation": row["explanation"],
         "status": row["status"],
+        "escalated_at": _optional(row, "escalated_at"),
         "assigned_to": row["assigned_to"],
         "acknowledged_by": row["acknowledged_by"],
         "acknowledged_at": row["acknowledged_at"],

@@ -4885,3 +4885,13 @@ body.player-open #dashboard {
   font-size: 0.78rem;
   line-height: 1.4;
 }
+
+.alert-status-escalated {
+  background: var(--alert-danger-bg);
+  color: var(--alert-danger);
+  font-weight: 700;
+}
+
+.alert-item.is-escalated {
+  border-left: 3px solid var(--alert-danger);
+}
