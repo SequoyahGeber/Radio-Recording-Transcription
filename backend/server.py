@@ -3463,6 +3463,43 @@ async def update_alert(
     return alert
 
 
+class AlertDeliveryPayload(BaseModel):
+    status: str
+    delivery_method: str = "browser"
+
+
+@app.post("/api/alerts/{alert_id}/delivery")
+def record_alert_delivery(alert_id: int, payload: AlertDeliveryPayload, request: Request):
+    """Record what actually reached this operator for a given alert.
+
+    The alert_deliveries table existed from the start and nothing ever wrote to
+    it, so a notification that never arrived - suppressed by quiet hours, or by
+    a browser that refused permission - left no trace to explain the silence.
+    """
+    session = require_role(request, "viewer")
+    status = payload.status[:40]
+    method = payload.delivery_method[:40]
+    with connect() as connection:
+        exists = connection.execute(
+            "SELECT 1 FROM alert_events WHERE id = ?", (alert_id,)
+        ).fetchone()
+        if exists is None:
+            raise HTTPException(status_code=404, detail="Alert not found")
+        connection.execute(
+            """
+            INSERT INTO alert_deliveries(
+                alert_id, username, delivery_method, status, attempted_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(alert_id, username, delivery_method) DO UPDATE SET
+                status = excluded.status,
+                attempted_at = excluded.attempted_at
+            """,
+            (alert_id, session["u"], method, status, datetime.now().isoformat()),
+        )
+        connection.commit()
+    return {"status": "recorded"}
+
+
 @app.get("/api/notification-preferences")
 def get_notification_preferences(request: Request):
     session = require_role(request, "viewer")

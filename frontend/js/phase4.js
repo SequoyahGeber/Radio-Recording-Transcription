@@ -7,6 +7,7 @@ const phaseFourState = {
   nextBeforeRank: null,
   profile: null,
   notificationPreferences: {},
+  audio: null,
 };
 
 const phaseFourView = document.getElementById("alert-inbox-view");
@@ -471,15 +472,77 @@ async function phaseFourTestRule() {
   }
 }
 
+function phaseFourRecordDelivery(alert, status) {
+  fetch(`/api/alerts/${alert.id}/delivery`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status, delivery_method: "browser" }),
+  }).catch(() => {
+    // Delivery bookkeeping must never interfere with showing the alert.
+  });
+}
+
+function phaseFourWithinQuietHours(preferences, now = new Date()) {
+  const start = preferences.quiet_start || "";
+  const end = preferences.quiet_end || "";
+  if (!start || !end) return false;
+  const current = `${String(now.getHours()).padStart(2, "0")}:${String(
+    now.getMinutes(),
+  ).padStart(2, "0")}`;
+  // A window such as 22:00-06:00 runs through midnight.
+  return start <= end
+    ? current >= start && current <= end
+    : current >= start || current <= end;
+}
+
+function phaseFourPlayAlertTone(severity) {
+  // Generated rather than loaded: the dashboard's content policy allows no
+  // external media, and a shipped sound file would still need decoding.
+  try {
+    const Context = window.AudioContext || window.webkitAudioContext;
+    if (!Context) return;
+    phaseFourState.audio = phaseFourState.audio || new Context();
+    const context = phaseFourState.audio;
+    if (context.state === "suspended") context.resume();
+    const now = context.currentTime;
+    const beeps = severity === "critical" ? [0, 0.28, 0.56] : [0];
+    for (const offset of beeps) {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = severity === "critical" ? 880 : 620;
+      gain.gain.setValueAtTime(0.0001, now + offset);
+      gain.gain.exponentialRampToValueAtTime(0.25, now + offset + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + 0.22);
+      oscillator.connect(gain).connect(context.destination);
+      oscillator.start(now + offset);
+      oscillator.stop(now + offset + 0.24);
+    }
+  } catch {
+    // A browser that refuses audio must not stop the visible notification.
+  }
+}
+
 function phaseFourNotifyAlert(alert) {
-  const minimum =
-    phaseFourState.notificationPreferences.minimum_severity || "urgent";
+  const preferences = phaseFourState.notificationPreferences;
+  const minimum = preferences.minimum_severity || "urgent";
+  const loudEnough =
+    phaseFourSeverityOrder[alert.severity] >= phaseFourSeverityOrder[minimum];
+  // Quiet hours silence everything except critical traffic, which is the one
+  // thing an operator asked to be woken for.
+  const quiet =
+    phaseFourWithinQuietHours(preferences) && alert.severity !== "critical";
+  if (loudEnough && !quiet && preferences.sound_enabled) {
+    phaseFourPlayAlertTone(alert.severity);
+  }
   if (
     !notificationsEnabled ||
-    phaseFourSeverityOrder[alert.severity] < phaseFourSeverityOrder[minimum] ||
+    !loudEnough ||
+    quiet ||
     !("Notification" in window) ||
     Notification.permission !== "granted"
   ) {
+    phaseFourRecordDelivery(alert, quiet ? "suppressed_quiet_hours" : "skipped");
     return;
   }
   const notification = new Notification(
@@ -494,6 +557,7 @@ function phaseFourNotifyAlert(alert) {
     window.focus();
     phaseFourOpenView();
   };
+  phaseFourRecordDelivery(alert, "delivered");
 }
 
 window.phaseFourHandleEvent = function (event) {

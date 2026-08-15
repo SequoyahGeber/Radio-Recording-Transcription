@@ -1980,6 +1980,96 @@ class AlertEscalationTests(unittest.TestCase):
                 connection.commit()
 
 
+class AlertDeliveryRecordTests(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app, base_url="https://127.0.0.1")
+        self.assertEqual(
+            self.client.post(
+                "/api/login",
+                json={"username": "admin", "password": "admin-password"},
+            ).status_code,
+            200,
+        )
+
+    def test_a_suppressed_notification_leaves_an_explainable_record(self):
+        stamp = secrets.token_hex(4)
+        with connect() as connection:
+            rule_id = connection.execute(
+                """
+                INSERT INTO alert_rules(
+                    name, severity, match_mode, terms_json, exclusions_json,
+                    channel_scope_json, active, cooldown_seconds, created_by,
+                    updated_by, created_at, updated_at, version
+                ) VALUES (?, 'urgent', 'word', '["delivery"]', '[]', '[]', 1, 0,
+                          'test', 'test', '2026-08-01T00:00:00',
+                          '2026-08-01T00:00:00', 1)
+                """,
+                (f"Delivery rule {stamp}",),
+            ).lastrowid
+            transcript_id = connection.execute(
+                """
+                INSERT INTO transcripts(
+                    timestamp, recorded_at, channel, filename, transcript_text,
+                    raw_transcript_text, quality_score, quality_reason, status
+                ) VALUES ('2026-08-03T10:00:00', '2026-08-03T09:59:00', 'Delivery',
+                          ?, 'delivery test', 'delivery test', 1.0, '', 'ready')
+                """,
+                (f"Delivery/{stamp}.mp3",),
+            ).lastrowid
+            alert = {
+                "id": connection.execute(
+                    """
+                    INSERT INTO alert_events(
+                        transcript_id, rule_id, severity, matched_text, explanation,
+                        status, version, created_at, updated_at
+                    ) VALUES (?, ?, 'urgent', 'delivery', 'test', 'open', 1,
+                              '2026-08-03T10:00:00', '2026-08-03T10:00:00')
+                    """,
+                    (transcript_id, rule_id),
+                ).lastrowid
+            }
+            connection.commit()
+        self.addCleanup(self._remove, rule_id, stamp)
+        response = self.client.post(
+            f"/api/alerts/{alert['id']}/delivery",
+            json={"status": "suppressed_quiet_hours", "delivery_method": "browser"},
+        )
+        self.assertEqual(response.status_code, 200)
+        with connect(read_only=True) as connection:
+            row = connection.execute(
+                """
+                SELECT status, username FROM alert_deliveries
+                WHERE alert_id = ? AND delivery_method = 'browser'
+                """,
+                (alert["id"],),
+            ).fetchone()
+        self.assertEqual(row["status"], "suppressed_quiet_hours")
+        self.assertEqual(row["username"], "admin")
+        self.assertEqual(
+            self.client.post(
+                "/api/alerts/999999/delivery", json={"status": "delivered"}
+            ).status_code,
+            404,
+        )
+
+    def _remove(self, rule_id, stamp):
+        with connect() as connection:
+            connection.execute(
+                """
+                DELETE FROM alert_deliveries WHERE alert_id IN (
+                    SELECT id FROM alert_events WHERE rule_id = ?
+                )
+                """,
+                (rule_id,),
+            )
+            connection.execute("DELETE FROM alert_events WHERE rule_id = ?", (rule_id,))
+            connection.execute("DELETE FROM alert_rules WHERE id = ?", (rule_id,))
+            connection.execute(
+                "DELETE FROM transcripts WHERE filename = ?", (f"Delivery/{stamp}.mp3",)
+            )
+            connection.commit()
+
+
 class DiagnosticsRedactionTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app, base_url="https://127.0.0.1")
