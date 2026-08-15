@@ -61,10 +61,19 @@ rollback() {
         done
     fi
     if [[ "$NEW_INSTALLED" -eq 1 && -e "$APP_PATH" ]]; then
-        /bin/rm -rf "$APP_PATH"
+        # If the failed install cannot be removed, moving the previous bundle
+        # onto that path would bury the only working copy inside the wreckage
+        # and leave the Mac with no launchable app at all.
+        if ! /bin/rm -rf "$APP_PATH"; then
+            log "Could not remove the failed install at $APP_PATH"
+        fi
     fi
     if [[ "$TARGET_MOVED" -eq 1 && -e "$PREVIOUS_APP" ]]; then
-        /bin/mv "$PREVIOUS_APP" "$APP_PATH"
+        if [[ -e "$APP_PATH" ]]; then
+            log "Refusing to restore over an existing bundle; the previous app is kept at $PREVIOUS_APP"
+        else
+            /bin/mv "$PREVIOUS_APP" "$APP_PATH"
+        fi
     fi
     if [[ -e "$OLDER_APP" && ! -e "$PREVIOUS_APP" ]]; then
         /bin/mv "$OLDER_APP" "$PREVIOUS_APP"
@@ -77,6 +86,8 @@ rollback() {
     fi
     if [[ -e "$APP_PATH" ]]; then
         /usr/bin/open -n "$APP_PATH"
+    else
+        log "ROLLBACK INCOMPLETE: no application at $APP_PATH. The previous version is at $PREVIOUS_APP."
     fi
     log "Rollback complete"
 }

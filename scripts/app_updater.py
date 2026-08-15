@@ -329,9 +329,15 @@ def prepare_update(current_version, repository, app_path, data_dir):
     update_root = os.path.join(
         data_dir, "updates", f"staged-{status['latest_version']}"
     )
-    os.makedirs(os.path.dirname(update_root), exist_ok=True)
-    if os.path.exists(update_root):
-        shutil.rmtree(update_root)
+    staging_parent = os.path.dirname(update_root)
+    os.makedirs(staging_parent, exist_ok=True)
+    # Each staged release is roughly a gigabyte. Only one can be installed, and
+    # an operator who declines the final confirmation left the rest behind
+    # forever, so an installation that skipped a few releases eventually had no
+    # room to stage the one it wanted.
+    for entry in os.listdir(staging_parent):
+        if entry.startswith("staged-"):
+            shutil.rmtree(os.path.join(staging_parent, entry), ignore_errors=True)
     os.makedirs(update_root)
 
     dmg_path = os.path.join(update_root, status["asset"]["name"])

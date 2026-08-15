@@ -609,10 +609,16 @@ function phaseTwoRenderWorkspaces() {
       remove.setAttribute("aria-label", `Delete ${workspace.name}`);
       remove.textContent = "×";
       remove.addEventListener("click", async () => {
-        await phaseTwoJson(`/api/workspaces/${workspace.id}`, {
-          method: "DELETE",
-        });
-        await phaseTwoLoadWorkspaces();
+        // A delete that fails - already removed elsewhere, or the server
+        // restarting - used to leave the row on screen with no explanation.
+        try {
+          await phaseTwoJson(`/api/workspaces/${workspace.id}`, {
+            method: "DELETE",
+          });
+        } catch (error) {
+          showToast(error.message, "danger");
+        }
+        await phaseTwoLoadWorkspaces().catch(() => {});
       });
       row.appendChild(remove);
     }
@@ -957,6 +963,21 @@ phaseTwoAudio.addEventListener("ended", () => {
   phaseTwoPlayerProgress.value = "0";
   phaseTwoAudio.currentTime = 0;
   phaseTwoUpdatePlayerButtons(false);
+});
+
+document.getElementById("workspace-name").addEventListener("input", (event) => {
+  // Re-saving under an existing name updates that workspace, so the sharing
+  // state has to follow it. Leaving the box unchecked silently removed a shared
+  // workspace from every other operator's list.
+  const existing = (phaseTwoState.workspaces || []).find(
+    (workspace) =>
+      workspace.name.toLowerCase() === event.target.value.trim().toLowerCase(),
+  );
+  if (existing) {
+    document.getElementById("workspace-shared").checked = Boolean(
+      existing.is_shared,
+    );
+  }
 });
 
 document.getElementById("workspace-button").addEventListener("click", async () => {

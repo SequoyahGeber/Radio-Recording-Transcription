@@ -19,7 +19,10 @@ APP_SOURCE="dist/$APP_NAME.app"
 if [[ "${SKIP_APP_BUILD:-0}" != "1" ]]; then
     ./scripts/build_app.command
     BUNDLED_APP="$STAGING_ROOT/built-$APP_NAME.app"
-    mv "$APP_SOURCE" "$BUNDLED_APP"
+    # Copy rather than move: the built app is what the README tells the
+    # maintainer to open, and moving it into the staging directory deleted it
+    # with the staging directory when the release finished.
+    cp -R "$APP_SOURCE" "$BUNDLED_APP"
     APP_SOURCE="$BUNDLED_APP"
 fi
 

@@ -514,3 +514,13 @@ phaseThreeLoadFacets()
       error.message,
     ),
   );
+
+// Facets are read once at load. On a dashboard left open for weeks, a new feed,
+// a Large V3 retry or a new reviewer would never appear in the filter lists, so
+// those transmissions could not be filtered for at all.
+window.setInterval(
+  () => {
+    phaseThreeLoadFacets().catch(() => {});
+  },
+  15 * 60 * 1000,
+);
