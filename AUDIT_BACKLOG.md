@@ -80,6 +80,38 @@ Evidence: rolling-audit workspace `audit/radio-recording-identity.{py,log}`. No 
 production archive ran. The transcript contents were deliberately synthetic; this check verifies scheduling and
 identity handling, not recognition quality or concurrent in-flight replacement.
 
+### Follow-up: same-size replacement and legacy destination adoption
+
+Two additional generated-WAV cases called the real `sync_once`, with SHA verification explicitly enabled:
+
+- **Previously synchronized path:** after an initial verified copy of a 3,244-byte WAV, rewrite the source with
+  different samples, the same byte length and a different settled modification time. Sync skips it, leaves the old
+  local audio intact and retains the old recorded mtime. This is another consequence of the same fast-path defect,
+  rather than an independent finding.
+- **Legacy path without a sync row:** create valid source/local WAVs of the same 3,244-byte length but different
+  sample contents. The real adoption path in `destination_is_current` checks length only, appends a sync record with
+  the current source size/mtime and a null checksum, and accepts the different local bytes. A subsequent sync also
+  leaves those bytes unchanged. This does not require a previously synchronized source to change: the adoption
+  predicate itself equates same length with current content.
+
+```json
+{"known":{"sameSizeReplacementSkipped":true,"size":3244,"storedMtimeMatchesNewSource":false},"legacy":{"adoptedChecksumIsNull":true,"adoptedSourceIdentity":true,"destinationStillDifferent":true,"size":3244},"shaVerificationEnabled":true}
+```
+
+The adoption pass reported `copied=0, already_local=2, unsettled=0, failed=0` including the known stale fixture.
+SHA verification currently applies to the copy path, so enabling it does not establish equality for adopted files.
+Both paths are consolidated into AUD-001's archive/content identity lifecycle; no additional severity count is added.
+
+**Fix scope clarification:** checking current source metadata in the known-record fast path alone cannot make legacy
+adoption trustworthy. Compare content before recording an untracked destination as current, or explicitly preserve
+an unverified state with a visible reconciliation policy. Retain existing recordings and reviewed transcripts until
+replacement/review handling is defined. Cover equal-length/different-content files as well as growth, and preserve
+the prior local copy on verification or refresh failure.
+
+Evidence: rolling-audit workspace `audit/radio-same-size-adoption.{py,log}`. Only owned temporary source/audio/database
+files were used and removed afterward. No production recording, source mount, service or model ran. This checks
+steady settled files; same-size in-flight mutation or replacement with identical metadata remains untested.
+
 ### Executed coverage and verification limits
 
 - **12 existing tests passed** across `DurableJobTests`, `SyncPriorityTests` and `MultiYearArchiveMigrationTests`.
@@ -95,8 +127,8 @@ identity handling, not recognition quality or concurrent in-flight replacement.
   launcher, installed app, production recording or live service was accessed.
 - Evidence: `audit/radio-core-tests.log` and `audit/radio-backup-recovery.{py,log}` in the rolling-audit workspace.
   This is targeted verification, not a full API/browser/model suite or a real power-cut/device acceptance test.
-- Recording-version identity handling was checked in the follow-up above. Remaining Radio scope: same-size/legacy
-  destination adoption and concurrent in-flight replacement; these remain unverified review targets.
+- Recording-version identity handling and same-size/legacy adoption were checked in the follow-ups above. Remaining
+  Radio scope: concurrent in-flight replacement and identical-metadata mutation; these remain unverified review targets.
 
 This documentation commit changes only `AUDIT_BACKLOG.md`; no implementation, test, settings, workflow or deployment
 change is included.
