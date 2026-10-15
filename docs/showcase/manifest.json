@@ -1,0 +1,188 @@
+{
+  "repository": "https://github.com/SequoyahGeber/Radio-Recording-Transcription",
+  "source_commit": "1209871dd63974527c7942c0db2f30311bc3a00a",
+  "capture_date": "2026-10-15",
+  "environment": "Cloud Linux Chromium browser, actual unmodified web dashboard",
+  "scope": "Desktop dashboard screenshots only; no native macOS shell or mobile validation",
+  "data": {
+    "synthetic": true,
+    "upstream_fixture": "tests/fixtures/dashboard_fixture.py",
+    "transmissions": 176,
+    "feeds": 8,
+    "years": [
+      2024,
+      2025,
+      2026
+    ],
+    "alerts": 41,
+    "supplemental_incidents": 3,
+    "supplemental_tasks": 5,
+    "linked_transmissions": 9,
+    "audio": "Upstream silent 80 ms WAV fixture"
+  },
+  "capture_method": "Supported cua_repl browser screenshot API; original JPEG screenshots re-encoded as PNG with identical decoded RGB pixels. Overview and incident views used the normal browser zoom control at 80% and the screenshot API viewport clip to exclude capture overscan. No retouching, CSS changes, or UI text changes.",
+  "runtime_limits": [
+    "Official HTTP fixture mode used (RADIO_BROWSER_TEST_TLS=0). HTTPS-only live websocket rejects this origin, so Reconnecting and zero operators are expected.",
+    "Only the dashboard server ran. Worker and sync services were not started; fixture heartbeats became stale and health warnings remain visible.",
+    "No production recordings, private accounts, models, external services, or hosted CI were used.",
+    "No browser security warning bypass or trust-store changes were made.",
+    "Screenshots document inspected UI states, not a complete regression-test pass."
+  ],
+  "screenshots": [
+    {
+      "file": "01-operations-board.png",
+      "title": "Operations board",
+      "description": "Multi-feed dashboard with highlighted terms, review status and bookmarks. The visible pane shows Dispatch, Medical and Security; all eight feeds are available via horizontal navigation. Browser zoom at 80% gives the header and content more room.",
+      "width": 1475,
+      "height": 946,
+      "sha256": "822848224a0eddcd5bad36a3266f413a67fae1b5b23aa01994724334be8acb59",
+      "bytes": 698689,
+      "visually_reviewed": true,
+      "browser_zoom_percent": 80,
+      "capture_clip": {
+        "x": 0,
+        "y": 0,
+        "width": 1180,
+        "height": 757
+      }
+    },
+    {
+      "file": "02-transmission-review.png",
+      "title": "Transmission review",
+      "description": "Focused Dispatch feed with the review drawer, transcript, model comparison and note entry.",
+      "width": 1180,
+      "height": 757,
+      "sha256": "55f3d9c1a67d81f45ffb0b1106a19ac52321e3bb9e8e79f0dfb522b0d2edae8c",
+      "bytes": 305920,
+      "visually_reviewed": true,
+      "browser_zoom_percent": 100
+    },
+    {
+      "file": "03-archive-search.png",
+      "title": "Archive search",
+      "description": "Indexed multi-year search for gate: 78 matching transmissions, filters, snippets and result actions.",
+      "width": 1180,
+      "height": 757,
+      "sha256": "26921afc93b24c359c3cb3b66017d202dd03be21c29d60dc29ac2a3244bffcdf",
+      "bytes": 295593,
+      "visually_reviewed": true,
+      "browser_zoom_percent": 100
+    },
+    {
+      "file": "04-alert-inbox.png",
+      "title": "Alert inbox",
+      "description": "Synthetic alert list with severity, assignment, acknowledgement and false-positive controls.",
+      "width": 1180,
+      "height": 757,
+      "sha256": "c6d8cfd350e2c7b202b5b46e40f53eb87d373a35ff295046648cc883e4cb6d4c",
+      "bytes": 325985,
+      "visually_reviewed": true,
+      "browser_zoom_percent": 100
+    },
+    {
+      "file": "05-alert-rule-settings.png",
+      "title": "Alert rule settings",
+      "description": "Existing Safety assistance rule with terms, severity, match mode, exclusions and channel scope.",
+      "width": 1180,
+      "height": 757,
+      "sha256": "0a540ddd507f254040453e924c3823865872a8462ca1ea9bfe778d7de321db3e",
+      "bytes": 244351,
+      "visually_reviewed": true,
+      "browser_zoom_percent": 100
+    },
+    {
+      "file": "06-incident-workspace.png",
+      "title": "Incident workspace",
+      "description": "Three synthetic incidents with North gate arrival coordination selected, showing ownership, tags and linked timeline. Browser zoom at 80% gives the header and content more room.",
+      "width": 1475,
+      "height": 946,
+      "sha256": "f4c61b95f02d69209f7a5501a4457c470f34438218d0396459136355f5e817c1",
+      "bytes": 489391,
+      "visually_reviewed": true,
+      "browser_zoom_percent": 80,
+      "capture_clip": {
+        "x": 0,
+        "y": 0,
+        "width": 1180,
+        "height": 757
+      }
+    },
+    {
+      "file": "07-shift-handoff.png",
+      "title": "Shift handoff",
+      "description": "Generated handoff report with open incidents, active alerts, recent bookmarks and fixture health warnings.",
+      "width": 1180,
+      "height": 757,
+      "sha256": "f37e7b85cc36739b44c2e91acb56898d3632e73d8c5ec85574814afc0ecbb086",
+      "bytes": 321893,
+      "visually_reviewed": true,
+      "browser_zoom_percent": 100
+    },
+    {
+      "file": "08-recording-source-settings.png",
+      "title": "Recording source settings",
+      "description": "Source selection, scan timing, live-first window, backlog size and copy verification controls.",
+      "width": 1180,
+      "height": 757,
+      "sha256": "27f87ca7c978eb8f82bae109150ff88c9dd8c7b6a01cc616af4b8a766f40ab73",
+      "bytes": 290180,
+      "visually_reviewed": true,
+      "browser_zoom_percent": 100
+    },
+    {
+      "file": "09-transcription-settings.png",
+      "title": "Transcription settings",
+      "description": "Engine and model choices, rescue-pass options and retry limits. No transcription engine was run.",
+      "width": 1180,
+      "height": 757,
+      "sha256": "9cdd5a13b3114bae3d4026b26fe58564ba1db707a8136f958d423d5d5ee11be0",
+      "bytes": 311161,
+      "visually_reviewed": true,
+      "browser_zoom_percent": 100
+    },
+    {
+      "file": "10-storage-retention-settings.png",
+      "title": "Storage and retention",
+      "description": "Disk reserve, backups, audit history, queue history and log rotation controls.",
+      "width": 1180,
+      "height": 757,
+      "sha256": "a97c608aa33dc10e3e93810cb56e1ce36a766f40e300d850610803286f886a92",
+      "bytes": 260108,
+      "visually_reviewed": true,
+      "browser_zoom_percent": 100
+    },
+    {
+      "file": "11-system-health.png",
+      "title": "System health",
+      "description": "Actionable five-part health center; stale fixture worker/sync heartbeats are intentionally left visible.",
+      "width": 1180,
+      "height": 757,
+      "sha256": "d00aa39751ac154cacafb224bfa4d785c6ba0ce4c93e13081baa3e3eb4e0eb29",
+      "bytes": 400659,
+      "visually_reviewed": true,
+      "browser_zoom_percent": 100
+    },
+    {
+      "file": "12-command-palette.png",
+      "title": "Command palette",
+      "description": "Search, playback, feed focus, density, workspace and keyboard-shortcut commands.",
+      "width": 1180,
+      "height": 757,
+      "sha256": "e2569c5fbe8d5c7e6e1d685890cd53a9c00bd5831bf4a336e8d9fb09f98cd894",
+      "bytes": 152470,
+      "visually_reviewed": true,
+      "browser_zoom_percent": 100
+    },
+    {
+      "file": "13-focused-feed-audio-player.png",
+      "title": "Focused feed and audio player",
+      "description": "Dispatch focus mode with global playback, seek, speed and volume controls; audio is an upstream silent 80 ms fixture.",
+      "width": 1180,
+      "height": 757,
+      "sha256": "3d850eb85e32c1e7a9ad52c80034a70cedc6b6f15c8b2e35559e64c10de23a64",
+      "bytes": 297190,
+      "visually_reviewed": true,
+      "browser_zoom_percent": 100
+    }
+  ]
+}
