@@ -51,6 +51,35 @@ also require verification. Define what happens to an existing transcript/review 
 silently discard reviewed work or assume that replacing the audio alone updates its transcript. Add a two-pass
 regression covering both growth and replacement, plus failed refresh preserving the prior readable local copy.
 
+### Follow-up: refreshing audio alone leaves its transcript and job stale
+
+Verified separately from sync using an updated local generated WAV: `backend/worker.py`'s `unprocessed_paths`
+filters solely by transcript filename, and `backend/jobs.py`'s `enqueue_job` deduplicates on `(job_type, relative_path)`
+while retaining a completed job's status. Neither predicate compares recording bytes or a recording version.
+The watcher accepts created/moved events; an ordinary modified event has no handler. Even delivering another
+created/moved event for the changed path cannot requeue its completed primary job.
+
+A disposable harness used the real database initializer and durable job functions. It created a 3,244-byte WAV,
+claimed/completed its primary job with a synthetic version-one transcript, then rewrote the local WAV as 6,444 bytes
+without calling sync. It executed the exact AST-extracted `unprocessed_paths` function against that database, avoiding
+the worker's inference imports, and called the real `enqueue_job` again:
+
+```json
+{"dueJobCount":0,"jobStatusAfterChangedAudioEvent":"completed","oldAudioBytes":3244,"reconciliationCandidates":[],"sameJobId":true,"transcriptStillVersionOne":true,"updatedAudioBytes":6444}
+```
+
+This confirms a downstream identity gap even after audio refresh succeeds; it is consolidated here because it belongs
+to the same changed-recording lifecycle, rather than counted as another source-sync failure. Existing completed-event
+deduplication is intentional and covered by a passing test. Preserve that behavior for unchanged bytes while defining
+a new recording version for changed bytes. Preserve existing transcript/review history, visibly mark stale results,
+and enqueue work for the new version. The primary persistence path also uses `INSERT OR IGNORE` on unique filename,
+so merely resetting a job is insufficient to define correct replacement behavior; that forced-processing path was
+reviewed in source but was not executed. Add end-to-end version-change coverage before implementing a fix.
+
+Evidence: rolling-audit workspace `audit/radio-recording-identity.{py,log}`. No inference, file watcher, service or
+production archive ran. The transcript contents were deliberately synthetic; this check verifies scheduling and
+identity handling, not recognition quality or concurrent in-flight replacement.
+
 ### Executed coverage and verification limits
 
 - **12 existing tests passed** across `DurableJobTests`, `SyncPriorityTests` and `MultiYearArchiveMigrationTests`.
@@ -66,8 +95,8 @@ regression covering both growth and replacement, plus failed refresh preserving 
   launcher, installed app, production recording or live service was accessed.
 - Evidence: `audit/radio-core-tests.log` and `audit/radio-backup-recovery.{py,log}` in the rolling-audit workspace.
   This is targeted verification, not a full API/browser/model suite or a real power-cut/device acceptance test.
-- Next useful scope: recording-version changes and their transcript/job identity handling, then same-size/legacy
-  destination adoption. Those are review targets, not additional confirmed findings in this entry.
+- Recording-version identity handling was checked in the follow-up above. Remaining Radio scope: same-size/legacy
+  destination adoption and concurrent in-flight replacement; these remain unverified review targets.
 
 This documentation commit changes only `AUDIT_BACKLOG.md`; no implementation, test, settings, workflow or deployment
 change is included.
