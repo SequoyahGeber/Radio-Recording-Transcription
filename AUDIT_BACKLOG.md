@@ -109,8 +109,45 @@ replacement/review handling is defined. Cover equal-length/different-content fil
 the prior local copy on verification or refresh failure.
 
 Evidence: rolling-audit workspace `audit/radio-same-size-adoption.{py,log}`. Only owned temporary source/audio/database
-files were used and removed afterward. No production recording, source mount, service or model ran. This checks
-steady settled files; same-size in-flight mutation or replacement with identical metadata remains untested.
+files were used and removed afterward. No production recording, source mount, service or model ran. These cases check
+steady settled files; in-flight mutation and identical-metadata replacement are addressed separately below.
+
+### Follow-up: in-flight changes and identical-metadata replacement
+
+Three further generated-audio cases complete this bounded identity pass:
+
+1. **Ordinary in-place rewrite with changed mtime:** call the real `copy_verified` on a 1,600,044-byte WAV. Immediately
+   after its first 1 MiB read, rewrite the source with different generated samples and a changed mtime. The real
+   post-copy identity check raises `source changed while it was being copied`, deletes `.part`, and preserves the
+   prior local WAV. This protection worked in the tested interleaving.
+2. **In-place rewrite with size and mtime preserved:** repeat that interleaving, restoring the source's original
+   nanosecond mtime after the rewrite. With SHA verification enabled, the helper publishes the original first MiB
+   followed by the new source's remaining bytes. The resulting WAV is readable but equals neither complete version.
+   The transferred stream and staged destination hash match, while the source stat predicate also passes. This
+   establishes a conditional source-snapshot limitation, not a claim that normal mtime-changing writes evade detection.
+3. **Settled replacement with identical metadata:** after a normal verified sync, rewrite a small source with equal
+   length/different generated samples and restore its exact mtime. A second real sync skips it and retains the old local
+   bytes. This remains the same AUD-001 recording-identity issue; size/mtime comparison alone would not detect it.
+
+The only copy-path injection was a reader wrapper triggering the real source-file rewrite after a deterministic read.
+Read bytes, stat results, hash functions, validation decisions, publication and sync records were not mocked. The helper
+was invoked directly for the first two cases because the already-logged sync fast path otherwise skips an existing
+destination before refresh reaches it. The third case used `sync_once` normally.
+
+```json
+[{"case":"mtime-changed","copyRejected":true,"priorLocalPreserved":true,"publishedMixedVersions":false},{"case":"metadata-preserved","copyRejected":false,"priorLocalPreserved":false,"publishedMixedVersions":true},{"case":"settled-identical-metadata-replacement","sameSize":true,"sameMtimeNs":true,"staleLocalPreserved":true}]
+```
+
+**Fix scope clarification:** retain the working changed-mtime rejection and atomic staging behavior. Specify whether
+the source contract requires immutable finalized recordings. If concurrent rewrites or metadata-preserving replacement
+are supported, establish stronger snapshot/content identity and a retry/reconciliation policy; a hash calculated only
+over the copied stream proves transfer consistency, not that those bytes represent one complete source version.
+Available file identity/change metadata or a source recheck may help, but their guarantees must be tested on the
+actual mount. No universal snapshot guarantee or physical network-filesystem behavior was proved in this audit.
+
+Evidence: rolling-audit workspace `audit/radio-inflight-identity.{py,log}`. All source/destination/database files were
+temporary and generated; no service, model, production mount or personal recording was accessed. These are controlled
+interleavings rather than stress testing. They add evidence to AUD-001, not duplicate findings or fixes.
 
 ### Executed coverage and verification limits
 
@@ -127,8 +164,16 @@ steady settled files; same-size in-flight mutation or replacement with identical
   launcher, installed app, production recording or live service was accessed.
 - Evidence: `audit/radio-core-tests.log` and `audit/radio-backup-recovery.{py,log}` in the rolling-audit workspace.
   This is targeted verification, not a full API/browser/model suite or a real power-cut/device acceptance test.
-- Recording-version identity handling and same-size/legacy adoption were checked in the follow-ups above. Remaining
-  Radio scope: concurrent in-flight replacement and identical-metadata mutation; these remain unverified review targets.
+- Recording-version identity, same-size/legacy adoption and controlled in-flight/identical-metadata mutation were
+  checked in the follow-ups above. Real mount behavior, other interleavings and model/API integration remain untested.
+
+### Suggested next repository scope
+
+The next highest-value unaudited active source project is `SequoyahGeber/MIRE-Unreal` (last non-audit source activity
+October 6, 2026). Bound the first pass to `MireSaveRepository` / `MireSaveGameSubsystem`: interrupted save publication,
+primary/backup recovery ordering, corrupt save rejection and repeated-load inventory conservation. Existing save
+recovery/repository/round-trip tests provide starting points. Inspect its project instructions and isolate any fixtures
+before execution; do not launch packaged games, touch personal saves, change the active checkout or invoke release CI.
 
 This documentation commit changes only `AUDIT_BACKLOG.md`; no implementation, test, settings, workflow or deployment
 change is included.
